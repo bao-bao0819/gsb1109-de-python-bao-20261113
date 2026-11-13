@@ -23,3 +23,4 @@ limitations under the License.
 """
 from .interval import Interval
 from .intervaltree import IntervalTree
+from .batchtrace import UNCOVERED, BatchHistory, build_history
