@@ -41,11 +41,13 @@ Usage:
 from collections.abc import Hashable
 import datetime
 import functools
+import json
 import logging
+import os
 import random
 import re
 import time
-from typing import Set, List, Optional, Callable, Union
+from typing import Any, Dict, Set, List, Optional, Callable, Union
 
 logger = logging.getLogger("schedule")
 
@@ -76,6 +78,105 @@ class CancelJob:
     pass
 
 
+class Slot:
+    """
+    A logical run (a shift) of a :class:`Job`.
+
+    Slots are only recorded for jobs that have catch-up enabled with
+    :meth:`Job.catch_up`.  A slot is identified by the instant it was
+    supposed to run, not by the instant the work actually started.  This
+    keeps the cadence stable when a process was stopped or a run was slow.
+
+    The public ``state`` values are:
+
+    ``scheduled``
+        The slot is known but has not started.
+    ``started``
+        The job function was entered but no result was recorded yet.
+    ``interrupted``
+        A persisted ``started`` slot was found after a restart.
+    ``completed``
+        The job function returned and the result was recorded.
+    ``failed``
+        The job function raised a normal exception.
+    ``skipped``
+        The slot will not be run.  ``reason`` explains why.
+    """
+
+    def __init__(self, scheduled_at: datetime.datetime, state: str = "scheduled"):
+        self.scheduled_at = scheduled_at
+        self.state = state
+        self.started_at: Optional[datetime.datetime] = None
+        self.finished_at: Optional[datetime.datetime] = None
+        self.skipped_at: Optional[datetime.datetime] = None
+        self.attempts: int = 0
+        self.caught_up: bool = False
+        self.recovered: bool = False
+        self.reason: Optional[str] = None
+        self.error: Optional[str] = None
+
+    @property
+    def disposition(self) -> str:
+        """A human readable outcome for this logical slot."""
+        if self.state == "scheduled":
+            return "pending"
+        if self.state == "started":
+            return "running"
+        if self.state == "interrupted":
+            return "interrupted"
+        if self.state == "failed":
+            return "failed"
+        if self.state == "skipped":
+            return "skipped"
+        if self.state == "completed":
+            if self.recovered:
+                return "recovered"
+            if self.caught_up:
+                return "caught_up"
+            return "delivered"
+        return self.state
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scheduled_at": self.scheduled_at.isoformat(),
+            "state": self.state,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "skipped_at": self.skipped_at.isoformat() if self.skipped_at else None,
+            "attempts": self.attempts,
+            "caught_up": self.caught_up,
+            "recovered": self.recovered,
+            "reason": self.reason,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Slot":
+        slot = cls(datetime.datetime.fromisoformat(data["scheduled_at"]))
+        slot.state = data.get("state", "scheduled")
+        for name in ("started_at", "finished_at", "skipped_at"):
+            value = data.get(name)
+            if value:
+                setattr(slot, name, datetime.datetime.fromisoformat(value))
+        slot.attempts = int(data.get("attempts", 0))
+        slot.caught_up = bool(data.get("caught_up", False))
+        slot.recovered = bool(data.get("recovered", False))
+        slot.reason = data.get("reason")
+        slot.error = data.get("error")
+        return slot
+
+    def __repr__(self) -> str:
+        return "Slot(scheduled_at={}, disposition={}{})".format(
+            self.scheduled_at.isoformat(sep=" "),
+            self.disposition,
+            ", reason={}".format(self.reason) if self.reason else "",
+        )
+
+
+def now_without_microseconds() -> datetime.datetime:
+    return datetime.datetime.now().replace(microsecond=0)
+
+
 class Scheduler:
     """
     Objects instantiated by the :class:`Scheduler <Scheduler>` are
@@ -99,6 +200,12 @@ class Scheduler:
         runnable_jobs = (job for job in self.jobs if job.should_run)
         for job in sorted(runnable_jobs):
             self._run_job(job)
+            while (
+                job in self.jobs
+                and job.catch_up_max is not None
+                and job.pending_catch_up
+            ):
+                self._run_job(job)
 
     def run_all(self, delay_seconds: int = 0) -> None:
         """
@@ -118,6 +225,13 @@ class Scheduler:
         for job in self.jobs[:]:
             self._run_job(job)
             time.sleep(delay_seconds)
+            while (
+                job in self.jobs
+                and job.catch_up_max is not None
+                and job.pending_catch_up
+            ):
+                self._run_job(job)
+                time.sleep(delay_seconds)
 
     def get_jobs(self, tag: Optional[Hashable] = None) -> List["Job"]:
         """
@@ -194,6 +308,12 @@ class Scheduler:
 
     next_run = property(get_next_run)
 
+    def reconcile(self, tag: Optional[Hashable] = None) -> None:
+        """Refresh catch-up accounting for jobs without running them."""
+        for job in self.get_jobs(tag):
+            if job.catch_up_max is not None:
+                job._reconcile_catch_up()
+
     @property
     def idle_seconds(self) -> Optional[float]:
         """
@@ -254,12 +374,38 @@ class Job:
         self.tags: Set[Hashable] = set()  # unique set of tags for the job
         self.scheduler: Optional[Scheduler] = scheduler  # scheduler to register with
 
+        # Catch-up configuration. ``catch_up_max`` is None for jobs that keep
+        # the historical "only run what is due now" behavior.
+        self.catch_up_max: Optional[int] = None
+        self.catch_up_state_path: Optional[str] = None
+        self.catch_up_retry_interrupted: bool = False
+        self.catch_up_ledger_limit: int = 1000
+
+        # Logical run ledger, ordered by the instant each shift was due.
+        self._slots: List[Slot] = []
+        self._catch_up_queue: List[Slot] = []
+        self._catch_up_last_seen: Optional[datetime.datetime] = None
+        self._catch_up_anchor: Optional[datetime.datetime] = None
+        self._catch_up_active: Optional[Slot] = None
+
+        # A scheduler is expected to poll at least once a minute.  A longer
+        # silence means the process was stopped or slept through a grid point.
+        self.catch_up_poll_tolerance: datetime.timedelta = datetime.timedelta(
+            seconds=60
+        )
+
     def __lt__(self, other) -> bool:
         """
         PeriodicJobs are sortable based on the scheduled time they
         run next.
         """
-        return self.next_run < other.next_run
+        return self._effective_next_run < other._effective_next_run
+
+    @property
+    def _effective_next_run(self) -> Optional[datetime.datetime]:
+        if self._catch_up_queue:
+            return self._catch_up_queue[0].scheduled_at
+        return self.next_run
 
     def __str__(self) -> str:
         if hasattr(self.job_func, "__name__"):
@@ -661,13 +807,483 @@ class Job:
                 "Job is not associated with an scheduler"
             )
         self.scheduler.jobs.append(self)
+        if self.catch_up_max is not None:
+            self._activate_catch_up()
         return self
+
+    def catch_up(
+        self,
+        max_slots: int = 0,
+        state_path: Optional[str] = None,
+        retry_interrupted: bool = False,
+    ):
+        """
+        Enable bounded catch-up for this job and optionally persist its ledger.
+
+        By default a restarted process only runs whatever is due at that
+        instant and silently forgets the shifts it slept through.  With
+        catch-up enabled the job keeps the logical schedule: the cadence is
+        still derived from the original ``at`` grid and not from the time the
+        process happened to come back.
+
+        :param max_slots: How many of the most recent missed shifts may be run
+            after a restart.  ``0`` replays nothing and only records the skips.
+            Older missed shifts are recorded as skipped.
+        :param state_path: Optional JSON file used to persist the ledger.  This
+            is what lets a restarted process distinguish a shift that had
+            already started from one that never started.
+        :param retry_interrupted: When true, a shift that was ``started`` before
+            the restart is retried.  By default it is marked ``interrupted`` and
+            left alone so a half-finished result is never silently duplicated.
+        :return: The invoked job instance
+        """
+        if not isinstance(max_slots, int) or isinstance(max_slots, bool):
+            raise TypeError("max_slots must be an integer")
+        if max_slots < 0:
+            raise ScheduleValueError("max_slots must not be negative")
+        if state_path is not None and not isinstance(state_path, str):
+            raise TypeError("state_path must be a string or None")
+        if self.latest is not None:
+            raise ScheduleValueError(
+                "Catch-up requires a fixed interval; .to() jobs cannot catch up"
+            )
+
+        self.catch_up_max = max_slots
+        self.catch_up_state_path = state_path
+        self.catch_up_retry_interrupted = bool(retry_interrupted)
+        if self.job_func is not None:
+            self._activate_catch_up()
+        return self
+
+    @property
+    def slots(self) -> List[Slot]:
+        """A copy of this job's logical run ledger, oldest first."""
+        return list(self._slots)
+
+    @property
+    def skipped_slots(self) -> List[Slot]:
+        """Logical shifts that will not be run, oldest first."""
+        return [slot for slot in self._slots if slot.state == "skipped"]
+
+    @property
+    def interrupted_slots(self) -> List[Slot]:
+        """Shifts that had started but had no recorded result, oldest first."""
+        return [slot for slot in self._slots if slot.state == "interrupted"]
+
+    @property
+    def pending_catch_up(self) -> List[Slot]:
+        """Caught-up shifts that are queued but not yet run, oldest first."""
+        return list(self._catch_up_queue)
+
+    def slot_at(self, scheduled_at: datetime.datetime) -> Optional[Slot]:
+        """Return the ledger entry for a logical shift, if one exists."""
+        for slot in self._slots:
+            if slot.scheduled_at == scheduled_at:
+                return slot
+        return None
+
+    @property
+    def missed_slots(self) -> List[Slot]:
+        """Logical shifts that were due but did not deliver a normal result."""
+        return [
+            slot
+            for slot in self._slots
+            if slot.state in ("skipped", "interrupted", "failed")
+        ]
+
+    def catch_up_report(self) -> List[Dict[str, Any]]:
+        """Return a serializable accounting of every non-pending logical shift."""
+        return [
+            {
+                "scheduled_at": slot.scheduled_at,
+                "disposition": slot.disposition,
+                "state": slot.state,
+                "caught_up": slot.caught_up,
+                "reason": slot.reason,
+                "error": slot.error,
+            }
+            for slot in self._slots
+            if slot.state != "scheduled"
+        ]
+
+    def _new_slot(self, scheduled_at: datetime.datetime) -> Slot:
+        slot = Slot(scheduled_at)
+        self._slots.append(slot)
+        return slot
+
+    def _slot_for(self, scheduled_at: datetime.datetime) -> Slot:
+        slot = self.slot_at(scheduled_at)
+        if slot is None:
+            slot = self._new_slot(scheduled_at)
+        return slot
+
+    def _load_catch_up_payload(self) -> Optional[Dict[str, Any]]:
+        path = self.catch_up_state_path
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.warning("Ignoring unreadable catch-up state %s: %s", path, exc)
+            return None
+
+    def _restore_catch_up_state(self) -> None:
+        payload = self._load_catch_up_payload()
+        if not payload:
+            return
+        key = self._catch_up_key()
+        jobs = payload.get("jobs", {})
+        entry = jobs.get(key)
+        if entry is None:
+            return
+        if isinstance(entry, list):
+            entry = {"slots": entry}
+        for data in entry.get("slots", []):
+            slot = Slot.from_dict(data)
+            existing = self.slot_at(slot.scheduled_at)
+            if existing is None:
+                self._slots.append(slot)
+            else:
+                existing.__dict__.update(slot.__dict__)
+        self._slots.sort(key=lambda item: item.scheduled_at)
+        anchor = entry.get("anchor")
+        if anchor:
+            self._catch_up_anchor = datetime.datetime.fromisoformat(anchor)
+        last_seen = entry.get("last_seen")
+        if last_seen:
+            self._catch_up_last_seen = datetime.datetime.fromisoformat(last_seen)
+        next_run = entry.get("next_run")
+        if next_run and self._slots:
+            saved_next = datetime.datetime.fromisoformat(next_run)
+            if saved_next > now_without_microseconds():
+                self.next_run = saved_next
+
+    def _catch_up_key(self) -> str:
+        func = self.job_func
+        name = getattr(func, "__name__", None)
+        if name is None:
+            return str(func)
+        module = getattr(func, "__module__", "")
+        qualname = getattr(func, "__qualname__", name)
+        args = repr(getattr(func, "args", ()))
+        kwargs = repr(sorted(getattr(func, "keywords", {}).items()))
+        return "{}.{}{}{}".format(module, qualname, args, kwargs)
+
+    def _save_catch_up_state(self) -> None:
+        path = self.catch_up_state_path
+        if not path:
+            return
+        payload: Dict[str, Any] = {"version": 1, "jobs": {}}
+        current = self._load_catch_up_payload() or {}
+        payload["jobs"].update(current.get("jobs", {}))
+        payload["jobs"][self._catch_up_key()] = {
+            "slots": [slot.to_dict() for slot in self._slots],
+            "anchor": (
+                self._catch_up_anchor.isoformat()
+                if self._catch_up_anchor
+                else None
+            ),
+            "last_seen": (
+                self._catch_up_last_seen.isoformat()
+                if self._catch_up_last_seen
+                else None
+            ),
+            "next_run": self.next_run.isoformat() if self.next_run else None,
+        }
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+
+    def _catch_up_period(self) -> Optional[datetime.timedelta]:
+        if self.unit not in ("seconds", "minutes", "hours", "days", "weeks"):
+            return None
+        return datetime.timedelta(**{self.unit: self.interval})
+
+    def _activate_catch_up(self) -> None:
+        """Restore any ledger, then account for downtime since the last sighting."""
+        period = self._catch_up_period()
+        if period is None:
+            raise ScheduleValueError("Catch-up requires a fixed time unit")
+
+        self._slots = []
+        self._catch_up_queue = []
+        self._catch_up_last_seen = None
+        self._catch_up_anchor = None
+        self._catch_up_active = None
+        self._restore_catch_up_state()
+        now = now_without_microseconds()
+
+        if not self._slots:
+            if self.next_run is None:
+                self._schedule_next_run()
+            self._new_slot(self.next_run)
+            self._catch_up_anchor = self.next_run
+            self._catch_up_last_seen = now
+            self._save_catch_up_state()
+            return
+
+        for slot in self._slots:
+            if slot.state == "started":
+                if self.catch_up_retry_interrupted:
+                    slot.state = "skipped"
+                    slot.skipped_at = now
+                    slot.reason = "interrupted before restart"
+                else:
+                    slot.state = "interrupted"
+                    slot.reason = "started before restart; result not delivered"
+
+        self._catch_up_queue = []
+
+        if self._catch_up_anchor is None:
+            self._catch_up_anchor = min(slot.scheduled_at for slot in self._slots)
+
+        self._materialize_grid(now)
+        self._classify_downtime(now)
+        self._queue_retryable_interruptions(now)
+        self._catch_up_last_seen = now
+        self._advance_catch_up_next_run(now, period)
+        self._save_catch_up_state()
+
+    def _queue_retryable_interruptions(self, now: datetime.datetime) -> None:
+        if not self.catch_up_retry_interrupted:
+            return
+        retryable = [
+            slot
+            for slot in self._slots
+            if slot.state == "skipped" and slot.reason == "interrupted before restart"
+        ]
+        if not retryable:
+            return
+        for slot in retryable:
+            slot.state = "scheduled"
+            slot.skipped_at = None
+            slot.reason = "retry after interruption"
+            slot.caught_up = True
+            self._catch_up_queue.append(slot)
+        self._catch_up_queue.sort(key=lambda item: item.scheduled_at)
+
+    def _materialize_grid(self, now: datetime.datetime) -> None:
+        """Create ledger entries for every grid point up to ``now``."""
+        period = self._catch_up_period()
+        if period is None:
+            return
+        if self._catch_up_anchor is None:
+            return
+        threshold = now - period * self.catch_up_ledger_limit
+        if self._catch_up_last_seen is not None:
+            threshold = max(threshold, self._catch_up_last_seen - period)
+        cursor = self._catch_up_anchor
+        if cursor < threshold:
+            steps = (threshold - cursor) // period + 1
+            cursor = cursor + period * steps
+        while cursor <= now:
+            if self.slot_at(cursor) is None:
+                self._new_slot(cursor)
+            cursor += period
+
+    def _classify_downtime(self, now: datetime.datetime) -> None:
+        """Skip or replay shifts that were already due when the process woke up."""
+        if not self._catch_up_last_seen:
+            return
+        missed = [
+            slot
+            for slot in self._slots
+            if slot.state == "scheduled"
+            and not slot.caught_up
+            and self._catch_up_last_seen < slot.scheduled_at < now
+        ]
+        if not missed:
+            return
+        for slot in missed:
+            slot.state = "skipped"
+            slot.skipped_at = now
+            slot.reason = "missed while process was not running"
+        self._queue_catch_up(now, missed)
+
+    def _classify_overrun(self, now: datetime.datetime) -> None:
+        """Skip shifts that became due while the current execution was running."""
+        missed = [
+            slot
+            for slot in self._slots
+            if slot.state == "scheduled"
+            and not slot.caught_up
+            and slot.scheduled_at < now
+        ]
+        if not missed:
+            return
+        for slot in missed:
+            slot.state = "skipped"
+            slot.skipped_at = now
+            slot.reason = "shift was displaced by a slow run"
+
+    def _queue_catch_up(
+        self, now: datetime.datetime, missed: List[Slot]
+    ) -> None:
+        budget = min(self.catch_up_max or 0, len(missed))
+        if budget:
+            for slot in missed[len(missed) - budget :]:
+                slot.state = "scheduled"
+                slot.skipped_at = None
+                slot.reason = None
+                slot.caught_up = True
+                self._catch_up_queue.append(slot)
+        self._catch_up_queue.sort(key=lambda item: item.scheduled_at)
+
+    def _advance_catch_up_next_run(
+        self, now: datetime.datetime, period: datetime.timedelta
+    ) -> None:
+        if self._catch_up_queue:
+            self.next_run = self._catch_up_queue[0].scheduled_at
+            return
+        if (
+            self.next_run is not None
+            and self.next_run >= now
+            and self._is_on_grid(self.next_run)
+        ):
+            if self.slot_at(self.next_run) is None:
+                self._new_slot(self.next_run)
+            return
+        next_run = self._next_grid_after(now)
+        self.next_run = next_run
+        if next_run is not None and self.slot_at(next_run) is None:
+            self._new_slot(next_run)
+
+    def _is_on_grid(self, moment: datetime.datetime) -> bool:
+        period = self._catch_up_period()
+        if period is None or self._catch_up_anchor is None:
+            return False
+        return (moment - self._catch_up_anchor) % period == datetime.timedelta(0)
+
+    def _next_grid_after(self, moment: datetime.datetime) -> Optional[datetime.datetime]:
+        period = self._catch_up_period()
+        if period is None or self._catch_up_anchor is None:
+            return self.next_run
+        candidate = self._catch_up_anchor
+        if candidate > moment:
+            return candidate
+        while candidate <= moment:
+            candidate += period
+        return candidate
+
+    def _reconcile_catch_up(self) -> None:
+        if self.catch_up_max is None:
+            return
+        now = now_without_microseconds()
+        period = self._catch_up_period()
+        if period is None:
+            return
+
+        last = max((slot.scheduled_at for slot in self._slots), default=None)
+        if last is None:
+            self._activate_catch_up()
+            return
+
+        if self._catch_up_active is not None:
+            self._advance_catch_up_next_run(now, period)
+            return
+
+        previous_last_seen = self._catch_up_last_seen
+        polling_gap = (
+            previous_last_seen is not None
+            and now - previous_last_seen > self.catch_up_poll_tolerance
+        )
+        if polling_gap:
+            self._materialize_grid(now)
+            self._classify_downtime(now)
+        self._catch_up_last_seen = now
+        self._advance_catch_up_next_run(now, period)
+
+    def _run_with_catch_up(self):
+        now = now_without_microseconds()
+        if self._is_overdue(now):
+            self._close_catch_up("job deadline passed")
+            logger.debug("Cancelling job %s", self)
+            return CancelJob
+
+        if self._catch_up_queue:
+            slot = self._catch_up_queue.pop(0)
+            slot.caught_up = True
+        else:
+            if self.next_run is None:
+                self._schedule_next_run()
+            slot = self._slot_for(self.next_run)
+            slot.caught_up = False
+
+        self._catch_up_active = slot
+        slot.state = "started"
+        slot.started_at = now
+        slot.attempts += 1
+        slot.error = None
+        self.last_run = now
+        self._catch_up_last_seen = now
+        if self._catch_up_queue:
+            self.next_run = self._catch_up_queue[0].scheduled_at
+        else:
+            next_run = self._next_grid_after(slot.scheduled_at)
+            self.next_run = next_run
+            if next_run is not None and self.slot_at(next_run) is None:
+                self._new_slot(next_run)
+        self._save_catch_up_state()
+
+        logger.debug("Running job %s", self)
+        try:
+            ret = self.job_func()
+        except Exception as exc:
+            slot.state = "failed"
+            slot.finished_at = now_without_microseconds()
+            slot.error = "{}: {}".format(type(exc).__name__, exc)
+            self._catch_up_active = None
+            self._save_catch_up_state()
+            raise
+
+        slot.state = "completed"
+        slot.finished_at = now_without_microseconds()
+        slot.recovered = bool(
+            slot.attempts > 1 or slot.reason == "retry after interruption"
+        )
+        self._catch_up_active = None
+        self._materialize_grid(slot.finished_at)
+        self._classify_overrun(slot.finished_at)
+        self._catch_up_last_seen = slot.finished_at
+        if self._catch_up_queue:
+            self.next_run = self._catch_up_queue[0].scheduled_at
+        else:
+            next_run = self._next_grid_after(slot.finished_at)
+            self.next_run = next_run
+            if next_run is not None and self.slot_at(next_run) is None:
+                self._new_slot(next_run)
+        self._save_catch_up_state()
+
+        if self._is_overdue(self.next_run):
+            self._close_catch_up("job deadline passed")
+            logger.debug("Cancelling job %s", self)
+            return CancelJob
+        return ret
+
+    def _close_catch_up(self, reason: str) -> None:
+        now = now_without_microseconds()
+        for slot in self._slots:
+            if slot.state == "scheduled":
+                slot.state = "skipped"
+                slot.skipped_at = now
+                slot.reason = reason
+        self._catch_up_queue = []
+        self._catch_up_active = None
+        self._save_catch_up_state()
 
     @property
     def should_run(self) -> bool:
         """
         :return: ``True`` if the job should be run now.
         """
+        if self.catch_up_max is not None:
+            self._reconcile_catch_up()
         assert self.next_run is not None, "must run _schedule_next_run before"
         return datetime.datetime.now() >= self.next_run
 
@@ -683,6 +1299,10 @@ class Job:
                  deadline is reached.
 
         """
+        if self.catch_up_max is not None:
+            self._reconcile_catch_up()
+            return self._run_with_catch_up()
+
         if self._is_overdue(datetime.datetime.now()):
             logger.debug("Cancelling job %s", self)
             return CancelJob
@@ -746,6 +1366,8 @@ class Job:
             next_run = next_run.replace(tzinfo=None)
 
         self.next_run = next_run
+        if self.catch_up_max is not None and not self._slots:
+            self._new_slot(next_run)
 
     def _move_to_at_time(self, moment: datetime.datetime) -> datetime.datetime:
         """
@@ -859,6 +1481,13 @@ def run_all(delay_seconds: int = 0) -> None:
     :data:`default scheduler instance <default_scheduler>`.
     """
     default_scheduler.run_all(delay_seconds=delay_seconds)
+
+
+def reconcile(tag: Optional[Hashable] = None) -> None:
+    """Calls :meth:`reconcile <Scheduler.reconcile>` on the
+    :data:`default scheduler instance <default_scheduler>`.
+    """
+    default_scheduler.reconcile(tag)
 
 
 def get_jobs(tag: Optional[Hashable] = None) -> List[Job]:

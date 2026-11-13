@@ -67,6 +67,39 @@ Pass it an interval using the same syntax as above while omitting the ``.do()``.
 
 The ``@repeat`` decorator does not work on non-static class methods.
 
+Catch up missed shifts after downtime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default ``schedule`` only runs what is due at the moment you call
+``run_pending()``.  Periodic inspection jobs can opt into a bounded catch-up
+policy instead.  The cadence stays anchored to the original grid, so a process
+that was stopped from 08:07 to 09:01 resumes at 09:07, 09:22, 09:37, and so on
+instead of drifting to 09:01 + interval.
+
+.. code-block:: python
+
+    def inspect():
+        ...
+
+    # Keep the 07/22/37/52 grid and replay at most the two newest missed shifts.
+    # Persist the ledger so a restart can tell "started but interrupted" apart
+    # from "never started".
+    schedule.every(15).minutes.catch_up(
+        max_slots=2,
+        state_path="/var/lib/inspection/schedule-state.json",
+    ).do(inspect)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+``Job.slots`` exposes the logical ledger, and ``Job.catch_up_report()`` returns
+the disposition of each shift: ``delivered``, ``caught_up``, ``recovered``,
+``interrupted``, ``failed``, or ``skipped`` with a reason.  A shift that had
+already started but produced no result is marked ``interrupted`` and is not
+replayed by default; pass ``retry_interrupted=True`` to retry it explicitly.
+Use ``schedule.reconcile()`` to refresh the accounting without executing jobs.
+
 Pass arguments to a job
 ~~~~~~~~~~~~~~~~~~~~~~~
 

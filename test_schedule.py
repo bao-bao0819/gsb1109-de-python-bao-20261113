@@ -2,6 +2,7 @@
 
 import datetime
 import functools
+import tempfile
 from unittest import mock, TestCase
 import os
 import time
@@ -1597,3 +1598,274 @@ class SchedulerTests(TestCase):
         scheduler.every()
         scheduler.every(10).seconds
         scheduler.run_pending()
+
+    def test_catch_up_keeps_the_original_grid_after_downtime(self):
+        """08:07 -> 09:01 keeps the 07/22/37/52 cadence and replays two shifts."""
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(max_slots=2).do(mock_job)
+            assert job.next_run == datetime.datetime(2026, 11, 14, 8, 22)
+
+        with mock_datetime(2026, 11, 14, 9, 1):
+            schedule.run_pending()
+            assert mock_job.call_count == 2
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 7)
+
+            report = {entry["scheduled_at"]: entry for entry in job.catch_up_report()}
+            assert report[datetime.datetime(2026, 11, 14, 8, 22)]["disposition"] == "skipped"
+            assert report[datetime.datetime(2026, 11, 14, 8, 37)]["disposition"] == "caught_up"
+            assert report[datetime.datetime(2026, 11, 14, 8, 52)]["disposition"] == "caught_up"
+            assert datetime.datetime(2026, 11, 14, 9, 7) not in report
+
+    def test_slow_catch_up_does_not_move_the_next_regular_shift(self):
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(max_slots=2).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 9, 1):
+            schedule.run_pending()
+            assert mock_job.call_count == 2
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 7)
+
+        with mock_datetime(2026, 11, 14, 9, 7):
+            schedule.run_pending()
+            assert mock_job.call_count == 3
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 22)
+
+        with mock_datetime(2026, 11, 14, 9, 22):
+            schedule.run_pending()
+            assert mock_job.call_count == 4
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 37)
+
+    def test_interrupted_shift_is_not_replayed_by_default(self):
+        mock_job = make_mock_job()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = os.path.join(directory.name, "state.json")
+
+        def configure():
+            return every(15).minutes.catch_up(max_slots=2, state_path=state).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = configure()
+            assert job.next_run == datetime.datetime(2026, 11, 14, 8, 22)
+
+        with mock_datetime(2026, 11, 14, 8, 22):
+            schedule.run_pending()
+            assert mock_job.call_count == 1
+
+        # Simulate a process stopping after entering the 08:37 shift.
+        with mock_datetime(2026, 11, 14, 8, 37):
+            slot = job.slot_at(datetime.datetime(2026, 11, 14, 8, 37))
+            assert slot is not None
+            slot.state = "started"
+            job._save_catch_up_state()
+
+        schedule.clear()
+        with mock_datetime(2026, 11, 14, 9, 1):
+            restarted = configure()
+            schedule.run_pending()
+            assert mock_job.call_count == 2
+            assert [s.state for s in restarted.interrupted_slots] == ["interrupted"]
+            assert restarted.interrupted_slots[0].scheduled_at == datetime.datetime(
+                2026, 11, 14, 8, 37
+            )
+
+    def test_interrupted_shift_can_be_retried_explicitly(self):
+        mock_job = make_mock_job()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = os.path.join(directory.name, "state.json")
+
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(
+                max_slots=0, state_path=state
+            ).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 8, 22):
+            slot = job.slot_at(datetime.datetime(2026, 11, 14, 8, 22))
+            slot.state = "started"
+            job._save_catch_up_state()
+
+        schedule.clear()
+        with mock_datetime(2026, 11, 14, 8, 24):
+            restarted = every(15).minutes.catch_up(
+                max_slots=0, state_path=state, retry_interrupted=True
+            ).do(mock_job)
+            assert [s.scheduled_at for s in restarted.pending_catch_up] == [
+                datetime.datetime(2026, 11, 14, 8, 22)
+            ]
+            assert restarted.slot_at(datetime.datetime(2026, 11, 14, 8, 22)).state == "scheduled"
+            schedule.run_pending()
+            assert mock_job.call_count == 1
+            retried = restarted.slot_at(datetime.datetime(2026, 11, 14, 8, 22))
+            assert retried.state == "completed"
+            assert retried.recovered is True
+
+    def test_slow_run_records_displaced_shifts_as_overrun(self):
+        state = {"minute": 22}
+
+        def slow_job():
+            state["minute"] = 50
+
+        original_now = datetime.datetime.now
+
+        def advancing_now(tz=None):
+            return original_now(tz).replace(minute=state["minute"], second=0)
+
+        with mock_datetime(2026, 11, 14, 8, 7) as clock:
+            job = every(15).minutes.catch_up(max_slots=2).do(slow_job)
+            datetime.datetime.now = classmethod(
+                lambda cls, tz=None: clock.replace(minute=state["minute"], second=0)
+            )
+            try:
+                schedule.run_pending()
+            finally:
+                datetime.datetime.now = original_now
+            assert job.slot_at(datetime.datetime(2026, 11, 14, 8, 22)).state == "completed"
+            overrun = [
+                slot
+                for slot in job.missed_slots
+                if slot.reason == "shift was displaced by a slow run"
+            ]
+            assert [s.scheduled_at for s in overrun] == [
+                datetime.datetime(2026, 11, 14, 8, 37)
+            ]
+            assert job.next_run == datetime.datetime(2026, 11, 14, 8, 52)
+
+    def test_catch_up_state_survives_restart_without_replaying_delivered_work(self):
+        mock_job = make_mock_job()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = os.path.join(directory.name, "state.json")
+
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(
+                max_slots=2, state_path=state
+            ).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 8, 22):
+            schedule.run_pending()
+            assert mock_job.call_count == 1
+
+        schedule.clear()
+        with mock_datetime(2026, 11, 14, 8, 25):
+            restarted = every(15).minutes.catch_up(
+                max_slots=2, state_path=state
+            ).do(mock_job)
+            assert restarted.next_run == datetime.datetime(2026, 11, 14, 8, 37)
+            assert restarted.pending_catch_up == []
+            schedule.run_pending()
+            assert mock_job.call_count == 1
+
+    def test_catch_up_validates_configuration(self):
+        with self.assertRaises(ScheduleValueError):
+            every().minute.catch_up(max_slots=-1)
+        with self.assertRaises(TypeError):
+            every().minute.catch_up(max_slots="2")
+        with self.assertRaises(TypeError):
+            every().minute.catch_up(state_path=object())
+
+    def test_catch_up_works_with_hourly_at_grid(self):
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every().hour.at(":22").catch_up(max_slots=2).do(mock_job)
+            assert job.next_run == datetime.datetime(2026, 11, 14, 8, 22)
+
+        with mock_datetime(2026, 11, 14, 9, 1):
+            schedule.run_pending()
+            assert mock_job.call_count == 1
+            assert job.slot_at(datetime.datetime(2026, 11, 14, 8, 22)).disposition == "caught_up"
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 22)
+
+    def test_catch_up_works_with_daily_at_grid(self):
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every().day.at("08:22").catch_up(max_slots=2).do(mock_job)
+
+        with mock_datetime(2026, 11, 15, 9, 1):
+            schedule.run_pending()
+            assert mock_job.call_count == 2
+            assert job.slot_at(datetime.datetime(2026, 11, 14, 8, 22)).disposition == "caught_up"
+            assert job.slot_at(datetime.datetime(2026, 11, 15, 8, 22)).disposition == "caught_up"
+            assert job.next_run == datetime.datetime(2026, 11, 16, 8, 22)
+
+    def test_restart_in_same_slot_preserves_interrupted_state(self):
+        mock_job = make_mock_job()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = os.path.join(directory.name, "state.json")
+
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(
+                max_slots=2, state_path=state
+            ).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 8, 22, 10):
+            slot = job.slot_at(datetime.datetime(2026, 11, 14, 8, 22))
+            slot.state = "started"
+            slot.started_at = datetime.datetime(2026, 11, 14, 8, 22, 2)
+            slot.attempts = 1
+            job._save_catch_up_state()
+
+        schedule.clear()
+        with mock_datetime(2026, 11, 14, 8, 22, 30):
+            restarted = every(15).minutes.catch_up(
+                max_slots=2, state_path=state
+            ).do(mock_job)
+            schedule.run_pending()
+            assert mock_job.call_count == 0
+            slot = restarted.slot_at(datetime.datetime(2026, 11, 14, 8, 22))
+            assert slot.state == "interrupted"
+            assert restarted.interrupted_slots == [slot]
+            assert restarted.next_run == datetime.datetime(2026, 11, 14, 8, 37)
+
+    def test_multiple_catch_up_jobs_drain_independently(self):
+        first = make_mock_job("first")
+        second = make_mock_job("second")
+        with mock_datetime(2026, 11, 14, 8, 7):
+            first_job = every(15).minutes.catch_up(max_slots=2).do(first)
+            second_job = every(15).minutes.catch_up(max_slots=1).do(second)
+
+        with mock_datetime(2026, 11, 14, 9, 1):
+            schedule.run_pending()
+            assert first.call_count == 2
+            assert second.call_count == 1
+            assert first_job.next_run == datetime.datetime(2026, 11, 14, 9, 7)
+            assert second_job.next_run == datetime.datetime(2026, 11, 14, 9, 7)
+
+    def test_run_all_drains_catch_up_backlog(self):
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 11, 14, 8, 7):
+            job = every(15).minutes.catch_up(max_slots=2).do(mock_job)
+
+        with mock_datetime(2026, 11, 14, 9, 1):
+            schedule.run_all()
+            assert mock_job.call_count == 2
+            assert job.next_run == datetime.datetime(2026, 11, 14, 9, 7)
+
+    def test_catch_up_rejects_randomized_intervals(self):
+        with mock_datetime(2026, 11, 14, 8, 7):
+            with self.assertRaises(ScheduleValueError):
+                every(5).to(10).minutes.catch_up().do(make_mock_job())
+
+    def test_catch_up_daily_at_across_dst_change(self):
+        try:
+            import pytz  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("pytz unavailable")
+
+        mock_job = make_mock_job()
+        with mock_datetime(2026, 10, 24, 8, 7):
+            job = every().day.at("08:22", "Europe/Berlin").catch_up(2).do(mock_job)
+
+        with mock_datetime(2026, 10, 26, 9, 1):
+            schedule.run_pending()
+            assert mock_job.call_count == 2
+            assert [s.scheduled_at.strftime("%m-%d %H:%M") for s in job.slots] == [
+                "10-24 08:22",
+                "10-25 08:22",
+                "10-26 08:22",
+                "10-27 08:22",
+            ]
+            assert job.next_run == datetime.datetime(2026, 10, 27, 8, 22)

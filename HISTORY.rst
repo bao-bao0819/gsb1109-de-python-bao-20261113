@@ -3,6 +3,17 @@
 History
 -------
 
+Unreleased
+++++++++++
+
+- Add opt-in bounded catch-up for periodic jobs. ``Job.catch_up()`` keeps the
+  original slot grid across downtime, replays at most the newest missed slots,
+  and records every shift's disposition (``delivered``, ``caught_up``,
+  ``interrupted``, ``failed``, or ``skipped``). An optional state file makes the
+  ledger survive restarts so in-flight and never-started shifts are handled
+  separately.
+
+
 1.2.2 (2024-05-25)
 ++++++++++++++++++
 

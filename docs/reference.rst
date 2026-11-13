@@ -14,6 +14,7 @@ Main Interface
 .. autofunction:: every
 .. autofunction:: run_pending
 .. autofunction:: run_all
+.. autofunction:: reconcile
 .. autofunction:: get_jobs
 .. autofunction:: clear
 .. autofunction:: cancel_job
@@ -29,6 +30,10 @@ Classes
    :undoc-members:
 
 .. autoclass:: schedule.Job
+   :members:
+   :undoc-members:
+
+.. autoclass:: schedule.Slot
    :members:
    :undoc-members:
 
