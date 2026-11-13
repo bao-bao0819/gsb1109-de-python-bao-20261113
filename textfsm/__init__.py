@@ -9,5 +9,17 @@ parse a specific type of text input, returning a record of values
 for each input entity.
 """
 from textfsm.parser import *
+from textfsm import provenance
+from textfsm.provenance import (
+    Assignment,
+    CellProvenance,
+    ControlAction,
+    LineDisposition,
+    ParseTrace,
+    RecordCommit,
+    RecordProvenance,
+    RuleApplication,
+    SourceLine,
+)
 
 __version__ = '2.1.1'

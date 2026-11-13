@@ -27,9 +27,12 @@ for each input entity.
 
 import getopt
 import inspect
+import json
 import re
 import string
 import sys
+
+from textfsm import provenance
 
 
 class Error(Exception):
@@ -135,15 +138,26 @@ class TextFSMOptions(object):
 
     def OnCreateOptions(self):
       self._myvar = None
+      self._myvar_provenance = []
 
     def OnAssignVar(self):
       self._myvar = self.value.value
+      list_option = self.value.GetOption('List')
+      if list_option is not None:
+        # List keeps every element's provenance; it is the authoritative
+        # source regardless of the order options were declared in.
+        self._myvar_provenance = list(list_option._provenance)
+      else:
+        self._myvar_provenance = list(self.value.current_provenance)
 
     def OnClearVar(self):
       self.value.value = self._myvar
+      if self.value.GetOption('List') is None:
+        self.value.current_provenance = list(self._myvar_provenance)
 
     def OnClearAllVar(self):
       self._myvar = None
+      self._myvar_provenance = []
 
   class Fillup(OptionBase):
     """Like Filldown, but upwards until it finds a non-empty entry."""
@@ -156,12 +170,14 @@ class TextFSMOptions(object):
         value_idx = self.value.fsm.values.index(self.value)
         # Go up the list from the end until we see a filled value.
         # pylint: disable=protected-access
-        for result in reversed(self.value.fsm._result):
+        for record_index in range(len(self.value.fsm._result) - 1, -1, -1):
+          result = self.value.fsm._result[record_index]
           if result[value_idx]:
             # Stop when a record has this column already.
             break
           # Otherwise set the column value.
           result[value_idx] = self.value.value
+          self.value.fsm._TraceFillup(record_index, self.value)
 
   class Key(OptionBase):
     """Value constitutes part of the Key of the record."""
@@ -195,16 +211,26 @@ class TextFSMOptions(object):
         self._value.append(match.groupdict())
       else:
         self._value.append(self.value.value)
+      # The assignment for this line is the list element added above.
+      assignment = self.value.last_assignment
+      if assignment is not None:
+        assignment.element_index = len(self._value) - 1
+        self._provenance.append(assignment)
+        self.value.current_provenance = list(self._provenance)
 
     def OnClearVar(self):
       if 'Filldown' not in self.value.OptionNames():
         self._value = []
+        self._provenance = []
+      self.value.current_provenance = list(self._provenance)
 
     def OnClearAllVar(self):
       self._value = []
+      self._provenance = []
 
     def OnSaveRecord(self):
       self.value.value = list(self._value)
+      self.value.current_provenance = list(self._provenance)
 
 
 class TextFSMValue(object):
@@ -239,24 +265,53 @@ class TextFSMValue(object):
     self.options = []
     self.regex = None
     self.value = None
+    # Provenance for the value currently held.  This is populated only while
+    # a trace is being collected; it is empty for ordinary parsing.
+    self.compiled_regex = None
+    self.current_provenance = []
+    self.last_assignment = None
     self.fsm = fsm
     self._options_cls = options_class
 
-  def AssignVar(self, value):
-    """Assign a value to this Value."""
+  def GetOption(self, name):
+    """Return the named option instance, or None if it is not present."""
+    for option in self.options:
+      if option.name == name:
+        return option
+    return None
+
+  def AssignVar(self, value, value_provenance=None):
+    """Assign a value to this Value.
+
+    Args:
+      value: The matched value.
+      value_provenance: Optional list of provenance.Assignment objects. When
+        omitted any previous provenance is discarded.
+    """
     self.value = value
+    if value_provenance is None:
+      # A direct assignment replaces the value's previous provenance.
+      self.current_provenance = []
+      self.last_assignment = None
+    else:
+      self.current_provenance = list(value_provenance)
+      self.last_assignment = value_provenance[-1] if value_provenance else None
     # Call OnAssignVar on options.
     _ = [option.OnAssignVar() for option in self.options]
 
   def ClearVar(self):
     """Clear this Value."""
     self.value = None
+    self.current_provenance = []
+    self.last_assignment = None
     # Call OnClearVar on options.
     _ = [option.OnClearVar() for option in self.options]
 
   def ClearAllVar(self):
     """Clear this Value."""
     self.value = None
+    self.current_provenance = []
+    self.last_assignment = None
     # Call OnClearAllVar on options.
     _ = [option.OnClearAllVar() for option in self.options]
 
@@ -585,6 +640,12 @@ class TextFSM(object):
     # Name of the current state.
     self._cur_state_name = None
 
+    # Line-level provenance is collected only on request.
+    self.trace = None
+    self._trace_active = False
+    self._cur_line_trace = None
+    self._cur_application = None
+
     # Read and parse FSM definition.
     # Restore the file pointer once done.
     try:
@@ -620,6 +681,12 @@ class TextFSM(object):
     self._result = []
     self._ClearAllRecord()
 
+    # Provenance from a previous parse is no longer valid.
+    self.trace = None
+    self._trace_active = False
+    self._cur_line_trace = None
+    self._cur_application = None
+
   @property
   def header(self):
     """Returns header."""
@@ -641,36 +708,145 @@ class TextFSM(object):
       if value.name == name:
         return value
 
-  def _AppendRecord(self):
-    """Adds current record to result if well formed."""
+  def _AppendRecord(self, reason='record', line=None, application=None):
+    """Adds current record to result if well formed.
+
+    Args:
+      reason: str, provenance reason for the commit (``record`` or ``eof``).
+      line: provenance.SourceLine, the line that caused the commit. None for
+        an implicit end-of-input record.
+      application: provenance.RuleApplication, the recording rule application.
+    """
 
     # If no Values then don't output.
     if not self.values:
-      return
+      return None
 
     cur_record = []
+    record_values = []
+    record_provenance = []
     for value in self.values:
       try:
         value.OnSaveRecord()
       except SkipRecord:
+        self._MarkCurrentProvenance('skipped')
         self._ClearRecord()
-        return
+        return None
       except SkipValue:
         continue
 
       # Build current record into a list.
       cur_record.append(value.value)
+      record_values.append(value)
+      record_provenance.append(list(value.current_provenance))
 
     # If no Values in template or whole record is empty then don't output.
     if len(cur_record) == (cur_record.count(None) + cur_record.count([])):
-      return
+      self._MarkCurrentProvenance('empty')
+      return None
 
     # Replace any 'None' entries with null string ''.
     while None in cur_record:
       cur_record[cur_record.index(None)] = ''
 
+    record_index = len(self._result)
     self._result.append(cur_record)
+
+    if self._trace_active:
+      self._TraceRecord(
+          record_index,
+          cur_record,
+          record_values,
+          record_provenance,
+          reason,
+          line or self._cur_line_trace,
+          application or self._cur_application,
+      )
+
     self._ClearRecord()
+    return record_index
+
+  def _TraceRecord(
+      self,
+      record_index,
+      cur_record,
+      record_values,
+      record_provenance,
+      reason,
+      line,
+      application,
+  ):
+    """Attach provenance links for a freshly committed record."""
+    commit = provenance.RecordCommit(
+        record_index, line=line, reason=reason, application=application
+    )
+    record = self.trace.add_record(record_index, commit, headers=self.header)
+
+    for position, value in enumerate(record_values):
+      if position < len(self.header):
+        column = self.header[position]
+      else:
+        column = value.name
+      cell = provenance.CellProvenance(
+          record_index,
+          column,
+          cur_record[position],
+          [
+              assignment
+              for assignment in record_provenance[position]
+              if assignment.is_data
+          ],
+      )
+      cell.commit = commit
+      record.cells[column] = cell
+
+    if line is not None:
+      line.record_commits.append(commit)
+
+  def _TraceFillup(self, record_index, value):
+    """Update a previously committed cell filled by a Fillup value."""
+    if not self._trace_active:
+      return
+    try:
+      record = self.trace.record(record_index)
+    except IndexError:
+      return
+
+    column = value.name
+    cell = record.cells.get(column)
+    if cell is None:
+      cell = provenance.CellProvenance(record_index, column, value.value)
+      record.cells[column] = cell
+    cell.value = value.value
+    # Only complete list elements count as contributors; this keeps a Fillup
+    # from claiming an empty optional capture as a source line.
+    cell.set_contributions(
+        [a for a in value.current_provenance if a.is_data]
+    )
+
+  def _MarkCurrentProvenance(self, status):
+    """Mark pending assignments that did not reach a record."""
+    if not self._trace_active:
+      return
+    for value in self.values:
+      for assignment in value.current_provenance:
+        assignment._Mark(status)  # pylint: disable=protected-access
+
+  def _MarkPendingLineProvenance(self):
+    """Mark assignments from the current line that never committed."""
+    if not self._trace_active or self._cur_line_trace is None:
+      return
+    for assignment in self._cur_line_trace.assignments:
+      assignment._Mark('discarded')  # pylint: disable=protected-access
+
+  def _MarkAllPending(self):
+    """Mark every still-pending assignment as discarded at end of parse."""
+    if not self.trace:
+      return
+    for source_line in self.trace.lines:
+      for assignment in source_line.assignments:
+        if assignment.status == 'pending':
+          assignment._Mark('discarded')  # pylint: disable=protected-access
 
   def _Parse(self, template):
     """Parses template file for FSM structure.
@@ -897,6 +1073,9 @@ class TextFSM(object):
 
     First tuple is the header, every subsequent tuple is a row.
 
+    Parsing also records line and cell provenance, available as
+    ``self.trace`` after the call and via ``ParseTextWithTrace``.
+
     Args:
       text: (str), Text to parse with embedded newlines.
       eof: (boolean), Set to False if we are parsing only part of the file.
@@ -913,17 +1092,101 @@ class TextFSM(object):
     if text:
       lines = text.splitlines()
 
-    for line in lines:
-      self._CheckLine(line)
+    if self.trace is None:
+      self.trace = provenance.ParseTrace()
+      # pylint: disable=protected-access
+      self.trace._headers = list(self.header)
+    self._trace_active = True
+
+    for line_index, line in enumerate(lines):
+      line_number = len(self.trace.lines) + 1
+      source_line = self.trace.add_line(line_number, line)
+      self._cur_line_trace = source_line
+      try:
+        self._CheckLine(line)
+      except TextFSMError as exc:
+        source_line.error = str(exc)
+        self.trace.error = str(exc)
+        self._MarkPendingLineProvenance()
+        raise
+      finally:
+        self._cur_line_trace = None
+        self._cur_application = None
       if self._cur_state_name in ('End', 'EOF'):
+        # The parser stops before the remaining physical lines.  Still
+        # register them so a physical line lookup never has a gap.
+        self._TraceUnparsedLines(lines[line_index + 1:])
         break
 
     if self._cur_state_name != 'End' and 'EOF' not in self.states and eof:
       # Implicit EOF performs Next.Record operation.
       # Suppressed if Null EOF state is instantiated.
-      self._AppendRecord()
+      self._AppendRecord(reason='eof')
+
+    if self._trace_active:
+      self._MarkAllPending()
 
     return self._result
+
+  def _TraceUnparsedLines(self, lines):
+    """Register physical lines the FSM stopped before reading."""
+    if not self._trace_active:
+      return
+    for line in lines:
+      source_line = self.trace.add_line(len(self.trace.lines) + 1, line)
+      source_line.parsed = False
+
+  def ParseTextWithTrace(self, text, eof=True):
+    """Parse text and return ``(result, trace)``.
+
+    ``result`` is identical to the value returned by ``ParseText``.  ``trace``
+    is a ``provenance.ParseTrace`` describing every physical input line, rule
+    application, control action, record commit and cell contributor.
+    """
+    result = self.ParseText(text, eof)
+    return result, self.trace
+
+  def CellProvenance(self, record_index, column):
+    """Return the provenance of one committed cell.
+
+    This is a convenience wrapper over ``self.trace.cell``.  It is available
+    after ``ParseText``/``ParseTextWithTrace``.
+
+    Args:
+      record_index: int, 0-based result row index.
+      column: str column name, or int column position.
+
+    Returns:
+      A provenance.CellProvenance.
+
+    Raises:
+      TextFSMError: If no trace exists or the cell cannot be found.
+    """
+    if self.trace is None:
+      raise TextFSMError('No parse trace available; call ParseText first.')
+    try:
+      return self.trace.cell(record_index, column)
+    except IndexError as exc:
+      raise TextFSMError(str(exc)) from exc
+
+  def LineProvenance(self, line_number):
+    """Return the provenance of one physical input line.
+
+    Args:
+      line_number: int, 1-based physical input line number.
+
+    Returns:
+      A provenance.SourceLine.
+
+    Raises:
+      TextFSMError: If no trace exists or the line cannot be found.
+    """
+    if self.trace is None:
+      raise TextFSMError('No parse trace available; call ParseText first.')
+    try:
+      return self.trace.line(line_number)
+    except IndexError as exc:
+      raise TextFSMError(str(exc)) from exc
 
   def ParseTextToDicts(self, text, eof=True):
     """Calls ParseText and turns the result into list of dicts.
@@ -957,9 +1220,30 @@ class TextFSM(object):
     Args:
       line: A string, the current input line.
     """
-    for rule in self._cur_state:
+    for rule_index, rule in enumerate(self._cur_state):
       matched = self._CheckRule(rule, line)
       if matched:
+        application = None
+        if self._trace_active and self._cur_line_trace is not None:
+          application = provenance.RuleApplication(
+              self._cur_line_trace,
+              self._cur_state_name,
+              rule_index,
+              rule.line_num,
+              str(rule),
+              rule.line_op,
+              rule.record_op,
+              rule.new_state,
+          )
+          application.match_text = matched.group(0)
+          application.groups = {
+              name: value
+              for name, value in matched.groupdict().items()
+              if value is not None
+          }
+          self._cur_line_trace.applications.append(application)
+          self._cur_application = application
+
         for value in matched.groupdict():
           self._AssignVar(matched, value)
 
@@ -969,7 +1253,18 @@ class TextFSM(object):
             if rule.new_state not in ('End', 'EOF'):
               self._cur_state = self.states[rule.new_state]
             self._cur_state_name = rule.new_state
+          if application is not None:
+            application.state_after = self._cur_state_name
+            if rule.new_state:
+              self._TraceControl(
+                  'state',
+                  line,
+                  application,
+                  {'state': rule.new_state},
+              )
           break
+        if application is not None:
+          application.state_after = self._cur_state_name
 
   def _CheckRule(self, rule, line):
     """Check a line against the given rule.
@@ -997,7 +1292,22 @@ class TextFSM(object):
     """
     self._value = self._GetValue(value)
     if self._value is not None:
-      self._value.AssignVar(matched.group(value))
+      assigned_value = matched.group(value)
+      assignment = None
+      if self._trace_active and self._cur_line_trace is not None:
+        assignment = provenance.Assignment(
+            self._cur_line_trace,
+            self._cur_application,
+            value,
+            assigned_value,
+        )
+        self._cur_line_trace.assignments.append(assignment)
+        if self._cur_application is not None:
+          self._cur_application.assignments.append(assignment)
+      self._value.AssignVar(
+          assigned_value,
+          [assignment] if assignment is not None else None,
+      )
 
   def _Operations(self, rule, line):
     """Operators on the data record.
@@ -1027,18 +1337,32 @@ class TextFSM(object):
     """
     # First process the Record operators.
     if rule.record_op == 'Record':
-      self._AppendRecord()
+      record_index = self._AppendRecord()
+      if self._cur_application is not None:
+        detail = (
+            {'record': record_index}
+            if record_index is not None
+            else {'skipped': True}
+        )
+        self._TraceControl('record', line, self._cur_application, detail)
 
     elif rule.record_op == 'Clear':
       # Clear record.
       self._ClearRecord()
+      if self._cur_application is not None:
+        self._TraceControl('clear', line, self._cur_application)
 
     elif rule.record_op == 'Clearall':
       # Clear all record entries.
       self._ClearAllRecord()
+      if self._cur_application is not None:
+        self._TraceControl('clearall', line, self._cur_application)
 
     # Lastly process line operators.
     if rule.line_op == 'Error':
+      if self._cur_application is not None:
+        detail = {'message': rule.new_state} if rule.new_state else {}
+        self._TraceControl('error', line, self._cur_application, detail)
       if rule.new_state:
         raise TextFSMError(
             'Error: %s. Rule Line: %s. Input Line: %s.'
@@ -1052,17 +1376,36 @@ class TextFSM(object):
 
     elif rule.line_op == 'Continue':
       # Continue with current line without returning to the start of the state.
+      if self._cur_application is not None:
+        self._TraceControl('continue', line, self._cur_application)
       return False
 
     # Back to start of current state with a new line.
     return True
 
+  def _TraceControl(self, kind, line, application, detail=None):
+    """Record a state/record control action for a rule application."""
+    if not self._trace_active or self._cur_line_trace is None:
+      return
+    if application is None:
+      return
+    if kind in ('state',) and not application.new_state:
+      return
+
+    action = provenance.ControlAction(
+        kind, self._cur_line_trace, application, detail
+    )
+    self._cur_line_trace.control_actions.append(action)
+    application.control_actions.append(action)
+
   def _ClearRecord(self):
     """Remove non 'Filldown' record entries."""
+    self._MarkCurrentProvenance('cleared')
     _ = [value.ClearVar() for value in self.values]
 
   def _ClearAllRecord(self):
     """Remove all record entries."""
+    self._MarkCurrentProvenance('cleared')
     _ = [value.ClearAllVar() for value in self.values]
 
   def GetValuesByAttrib(self, attribute):
@@ -1086,25 +1429,62 @@ def main(argv=None):
     argv = sys.argv
 
   try:
-    opts, args = getopt.getopt(argv[1:], 'h', ['help'])
+    opts, args = getopt.getopt(
+        argv[1:],
+        'h',
+        ['help', 'trace', 'line=', 'cell=', 'format='],
+    )
   except getopt.error as exc:
     raise UsageError(exc) from exc
 
-  for opt, _ in opts:
+  trace = False
+  trace_format = 'text'
+  line_number = None
+  cell = None
+  for opt, value in opts:
     if opt in ('-h', '--help'):
       print(__doc__)
       print(help_msg)
       return 0
+    elif opt == '--trace':
+      trace = True
+    elif opt == '--format':
+      if value not in ('text', 'json'):
+        raise UsageError("Invalid format '%s'." % value)
+      trace_format = value
+    elif opt == '--line':
+      try:
+        line_number = int(value)
+      except ValueError as exc:
+        raise UsageError('Line must be an integer.') from exc
+    elif opt == '--cell':
+      # ROW:COLUMN, ROW is 0-based like ParseText results.
+      try:
+        row, column = value.split(':', 1)
+        cell = (int(row), column)
+      except ValueError as exc:
+        raise UsageError('Cell must be ROW:COLUMN.') from exc
 
   if not args or len(args) > 4:
     raise UsageError('Invalid arguments.')
+
+  # Asking for JSON trace output implies trace mode.
+  if trace_format == 'json':
+    trace = True
+
+  if (trace or line_number is not None or cell is not None) and len(args) < 2:
+    raise UsageError('--trace/--line/--cell require an input file.')
+
+  # JSON trace output is machine readable, so suppress the human preamble.
+  json_only = trace_format == 'json' and len(args) > 1
 
   # If we have an argument, parse content of file and display as a template.
   # Template displayed will match input template, minus any comment lines.
   result = ''
   with open(args[0], 'r') as template:
     fsm = TextFSM(template)
-    print('FSM Template:\n%s\n' % fsm)
+    if not json_only:
+      print('FSM Template:\n%s\n' % fsm)
 
     if len(args) > 1:
       # Second argument is file with example cli input.
@@ -1112,12 +1492,19 @@ def main(argv=None):
       with open(args[1], 'r') as f:
         cli_input = f.read()
 
-      table = fsm.ParseText(cli_input)
-      print('FSM Table:')
-      result = str(fsm.header) + '\n'
-      for line in table:
-        result += str(line) + '\n'
-      print(result, end='')
+      table, parsed_trace = fsm.ParseTextWithTrace(cli_input)
+      if not json_only:
+        print('FSM Table:')
+        result = str(fsm.header) + '\n'
+        for line in table:
+          result += str(line) + '\n'
+        print(result, end='')
+
+      if trace or line_number is not None or cell is not None:
+        try:
+          print(_FormatTrace(parsed_trace, trace_format, line_number, cell))
+        except IndexError as exc:
+          raise UsageError(str(exc)) from exc
 
   if len(args) > 2:
     # Compare tabular result with data in third file argument.
@@ -1132,8 +1519,107 @@ def main(argv=None):
       print('Data match!')
 
 
+def _FormatTrace(trace, trace_format='text', line_number=None, cell=None):
+  """Format a ParseTrace for the command line.
+
+  Args:
+    trace: provenance.ParseTrace.
+    trace_format: 'text' or 'json'.
+    line_number: Optional 1-based physical line to explain.
+    cell: Optional (row_index, column) tuple to explain.
+
+  Returns:
+    A string.
+  """
+  if trace_format == 'json':
+    if line_number is not None:
+      payload = trace.explain_line(line_number)
+    elif cell is not None:
+      payload = trace.cell(*cell).to_dict()
+    else:
+      payload = trace.to_dict()
+    return json.dumps(payload, indent=2, default=str)
+
+  output = []
+  if line_number is not None:
+    line = trace.line(line_number)
+    output.append(
+        'Line %d %r -> %s' % (line.number, line.text, line.disposition)
+    )
+    for action in line.control_actions:
+      detail = action.detail
+      if detail:
+        output.append('  control: %s %s' % (action.kind, detail))
+      else:
+        output.append('  control: %s' % action.kind)
+    for source_cell in line.data:
+      output.append(
+          '  data: row %d column %s = %r'
+          % (source_cell.record_index, source_cell.column, source_cell.value)
+      )
+    for assignment in line.discarded_assignments:
+      output.append(
+          '  discarded: %s = %r (%s)'
+          % (assignment.value_name, assignment.value, assignment.status)
+      )
+    if not line.matched:
+      output.append('  no rule matched this line')
+    return '\n'.join(output)
+
+  if cell is not None:
+    source_cell = trace.cell(*cell)
+    output.append(
+        'Row %d column %s = %r' % (cell[0], source_cell.column,
+                                   source_cell.value)
+    )
+    output.append('  source lines: %s' % source_cell.source_lines)
+    if source_cell.commit is not None:
+      output.append(
+          '  committed on %s'
+          % (
+              'line %s' % source_cell.commit_line
+              if source_cell.commit_line is not None
+              else 'implicit EOF'
+          )
+      )
+    for assignment in source_cell.contributions:
+      output.append(
+          '  line %s element %s = %r'
+          % (
+              assignment.line_number,
+              assignment.element_index,
+              assignment.value,
+          )
+      )
+    return '\n'.join(output)
+
+  output.append('Line disposition summary:')
+  for disposition, count in trace.summary().items():
+    output.append('  %-10s %d' % (disposition, count))
+  output.append('')
+  output.append('%-5s %-10s %s' % ('LINE', 'DISPOSITION', 'TEXT'))
+  for line in trace:
+    output.append('%-5d %-10s %s' % (line.number, line.disposition, line.text))
+  if trace.records:
+    output.append('')
+    output.append('%-6s %-6s %s' % ('ROW', 'COMMIT', 'SOURCE LINES'))
+    for record in trace.records:
+      output.append(
+          '%-6d %-6s %s'
+          % (
+              record.record_index,
+              record.commit_line if record.commit_line is not None else 'EOF',
+              record.source_lines,
+          )
+      )
+  return '\n'.join(output)
+
+
 if __name__ == '__main__':
-  help_msg = '%s [--help] template [input_file [output_file]]\n' % sys.argv[0]
+  help_msg = (
+      '%s [--help] [--trace] [--format text|json] [--line N] [--cell ROW:COL]\n'
+      '       template [input_file [output_file]]\n' % sys.argv[0]
+  )
   try:
     sys.exit(main())
   except UsageError as err:

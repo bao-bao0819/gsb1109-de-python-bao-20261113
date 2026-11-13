@@ -22,6 +22,38 @@ licence for the benefit of the wider community.
 
 [**See documentation for more details.**](https://github.com/google/textfsm/wiki/TextFSM)
 
+Line provenance
+---------------
+An offline parse can also produce a line-level ledger explaining where each
+input line went and which lines contributed to each committed cell.
+
+```python
+import textfsm
+
+with open('template') as template:
+  fsm = textfsm.TextFSM(template)
+  result, trace = fsm.ParseTextWithTrace(open('input').read())
+
+trace.line(4).disposition        # unmatched / control / data / discarded
+trace.cell_sources(0, 'Model')   # physical lines behind result[0]['Model']
+trace.record(0).commit_line      # line that committed the row (None for EOF)
+```
+
+`trace.line(n)` returns a `SourceLine` with `control_actions` (state changes,
+`Record`, `Clear`, `Clearall`, `Continue`, `Error`) kept separate from `data`,
+the final cells the line reached. Lines used only by a `Continue` chain still
+show every rule application in `applications`. `List` values record one
+contribution per element, so a single cell can name several source lines.
+
+The same views are available from the command line:
+
+```sh
+textfsm --trace template input           # per-line dispositions and commits
+textfsm --cell 0:Model template input    # reverse cell lookup
+textfsm --line 4 template input          # control vs data for one line
+textfsm --trace --format json template input
+```
+
 Before contributing
 -------------------
 If you are not a Google employee, our lawyers insist that you sign a Contributor
