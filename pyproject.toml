@@ -167,6 +167,15 @@ builtins-allowed-modules = [
 force-single-line = true
 
 [tool.ruff.lint.per-file-ignores]
+"left_right_catalog/report.py" = [
+    "RUF001",
+]
+"left_right_catalog/tests/*.py" = [
+    "D101",
+    "D102",
+    "D103",
+    "S101",
+]
 "pygeoif/factories.py" = [
     "SLF001",
 ]
