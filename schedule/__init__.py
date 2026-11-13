@@ -151,13 +151,20 @@ class Scheduler:
         """
         Delete a scheduled job.
 
+        Jobs are matched by identity, not by value: only the exact
+        registered instance is removed. A job that was replaced by a new
+        registration (e.g. under the same tag) can therefore never cancel
+        its successor, and two jobs that finish at the same moment remain
+        distinguishable.
+
         :param job: The job to be unscheduled
         """
-        try:
-            logger.debug('Cancelling job "%s"', str(job))
-            self.jobs.remove(job)
-        except ValueError:
-            logger.debug('Cancelling not-scheduled job "%s"', str(job))
+        for index, scheduled_job in enumerate(self.jobs):
+            if scheduled_job is job:
+                logger.debug('Cancelling job "%s"', str(job))
+                del self.jobs[index]
+                return
+        logger.debug('Cancelling not-scheduled job "%s"', str(job))
 
     def every(self, interval: int = 1) -> "Job":
         """
@@ -679,6 +686,11 @@ class Job:
         the job's deadline, CancelJob is returned after the execution. In this latter
         case CancelJob takes priority over any other returned value.
 
+        If the job is removed from the scheduler while it is running, the
+        result of this run is still recorded and returned, but no next run is
+        scheduled: a callback that is no longer on the schedule must not plan
+        a next round for the removed registration.
+
         :return: The return value returned by the `job_func`, or CancelJob if the job's
                  deadline is reached.
 
@@ -690,12 +702,30 @@ class Job:
         logger.debug("Running job %s", self)
         ret = self.job_func()
         self.last_run = datetime.datetime.now()
+
+        if not self._is_registered():
+            logger.debug(
+                "Job %s was removed from the schedule while running; "
+                "not scheduling a next run",
+                self,
+            )
+            return ret
+
         self._schedule_next_run()
 
         if self._is_overdue(self.next_run):
             logger.debug("Cancelling job %s", self)
             return CancelJob
         return ret
+
+    def _is_registered(self) -> bool:
+        """
+        :return: ``True`` if this exact job instance is still on its
+                 scheduler's job list.
+        """
+        if self.scheduler is None:
+            return False
+        return any(scheduled_job is self for scheduled_job in self.scheduler.jobs)
 
     def _schedule_next_run(self) -> None:
         """

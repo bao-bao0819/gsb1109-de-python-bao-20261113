@@ -1534,6 +1534,87 @@ class SchedulerTests(TestCase):
         schedule.run_all()
         assert len(schedule.jobs) == 0
 
+    def test_cancel_job_matches_by_identity(self):
+        # Jobs that compare equal must still be cancelled individually:
+        # only the exact registered instance is removed.
+        class EquallyComparableJob(schedule.Job):
+            def __eq__(self, other):
+                return isinstance(other, schedule.Job)
+
+            def __hash__(self):
+                return id(self)
+
+        scheduler = schedule.Scheduler()
+        first = EquallyComparableJob(1, scheduler).seconds.do(
+            make_mock_job(name="first")
+        )
+        second = EquallyComparableJob(1, scheduler).seconds.do(
+            make_mock_job(name="second")
+        )
+        assert len(scheduler.jobs) == 2
+
+        scheduler.cancel_job(second)
+        assert len(scheduler.jobs) == 1
+        assert scheduler.jobs[0] is first
+        scheduler.cancel_job(first)
+        assert len(scheduler.jobs) == 0
+
+    def test_late_cancel_job_does_not_cancel_reregistered_job(self):
+        # A daily job is cancelled and immediately re-registered under the
+        # same tag. When the old job's run finishes late and returns
+        # CancelJob, the new registration must survive and keep its next run.
+        scheduler = schedule.Scheduler()
+
+        def old_func():
+            scheduler.clear("daily")
+            scheduler.every().day.do(make_mock_job(name="new")).tag("daily")
+            return schedule.CancelJob
+
+        old_job = scheduler.every().day.do(old_func).tag("daily")
+        scheduler.run_all()
+
+        remaining = scheduler.get_jobs("daily")
+        assert len(remaining) == 1
+        assert remaining[0] is not old_job
+        assert remaining[0].next_run is not None
+
+    def test_job_removed_during_run_is_not_rescheduled(self):
+        # When a job is removed from the schedule while it is running, this
+        # run's result keeps its attribution (last_run is recorded and the
+        # return value is preserved), but no next round is scheduled.
+        scheduler = schedule.Scheduler()
+        holder = {}
+
+        def func():
+            scheduler.cancel_job(holder["job"])
+            return "result"
+
+        job = scheduler.every().day.do(func)
+        holder["job"] = job
+        previous_next_run = job.next_run
+
+        ret = job.run()
+        assert ret == "result"
+        assert job.last_run is not None
+        assert job.next_run == previous_next_run
+        assert len(scheduler.jobs) == 0
+
+    def test_simultaneous_jobs_are_cancelled_individually(self):
+        # Two jobs due at the same moment: a CancelJob returned by one must
+        # not affect the other.
+        scheduler = schedule.Scheduler()
+
+        def stop_job():
+            return schedule.CancelJob
+
+        keep = make_mock_job(name="keep")
+        scheduler.every().second.do(stop_job)
+        keep_job = scheduler.every().second.do(keep)
+
+        scheduler.run_all()
+        assert scheduler.jobs == [keep_job]
+        assert keep.call_count == 1
+
     def test_tag_type_enforcement(self):
         job1 = every().second.do(make_mock_job(name="job1"))
         self.assertRaises(TypeError, job1.tag, {})
