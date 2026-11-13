@@ -37,3 +37,10 @@ Exceptions
 ----------
 
 .. autoexception:: schedule.CancelJob
+
+
+Watermark reconciliation
+------------------------
+
+.. automodule:: schedule.reconciliation
+   :members:

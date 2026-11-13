@@ -47,6 +47,15 @@ import re
 import time
 from typing import Set, List, Optional, Callable, Union
 
+from .reconciliation import (
+    ReconciliationError,
+    ReconciliationReport,
+    ReconciliationScheduler,
+    Receipt,
+    Watermark,
+    make_receipt,
+)
+
 logger = logging.getLogger("schedule")
 
 

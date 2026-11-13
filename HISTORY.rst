@@ -3,6 +3,17 @@
 History
 -------
 
+Unreleased
+++++++++++
+
+- Add ``schedule.reconciliation``: watermark driven reconciliation
+  scheduling across independently polled sources. Windows dispatch only
+  after every required source seals them, corrections follow receipt
+  lineage so only dependent report versions are re-run, stale late
+  watermarks never displace confirmed receipts, and every report records
+  the exact per-source receipt it was built from.
+
+
 1.2.2 (2024-05-25)
 ++++++++++++++++++
 
