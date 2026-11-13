@@ -146,3 +146,61 @@ The returned JSON will include a key for each letter in the format string. For e
     }
 }
 ```
+
+## Editorial selection under a review budget
+
+`sqlite_fts4.selection` turns the FTS4 hits into a concrete review list when
+the number of manual reviews is capped. It enforces four rules:
+
+1. every business topic reaches its minimum sample quota first;
+2. a document evidencing two topics counts as a single review;
+3. same-source reprints (candidates sharing a `source`) are mutually
+   exclusive, so only one of them is ever picked;
+4. among every feasible selection, declared relevance is maximised, and any
+   leftover budget is spent on the best remaining documents.
+
+The exact DP keeps states keyed by `(topic counts, reviews used)`; a greedy
+fallback (flagged via `optimal: false`) covers inputs whose state space
+exceeds the configured limit.
+
+```python
+from sqlite_fts4.selection import Candidate, select_candidates
+
+candidates = [
+    Candidate("f1", frozenset(["finance"]), source="wire-a", relevance=0.95),
+    Candidate("f3", frozenset(["finance", "policy"]), relevance=0.90),
+    Candidate("t2", frozenset(["tech", "finance"]), source="wire-c", relevance=0.91),
+]
+result = select_candidates(
+    candidates,
+    quotas={"finance": 4, "policy": 3, "tech": 4},
+    budget=10,
+)
+```
+
+When the minima cannot all be met, `result.feasible` is `False` and the
+payload names the topics that fall short plus the missing count:
+
+- `shortfalls` - per-topic deficit under the review budget;
+- `diagnostics.topic_ceilings` - max distinct sources available per topic;
+- `diagnostics.min_reviews_required` / `budget_gap` - cheapest quota-satisfying
+  selection and how far the budget falls short (`null` if no selection can
+  satisfy the quotas at all);
+- `diagnostics.feasible_without_source_conflicts` - whether lifting the
+  one-per-source rule would rescue feasibility;
+- `diagnostics.conflict_groups` - reprint groups forcing those trade-offs;
+- `diagnostics.best_effort_selection` - best list achievable under budget.
+
+A JSON CLI is included:
+
+    python -m sqlite_fts4.selection --demo
+    python -m sqlite_fts4.selection hits.json
+
+Input shape:
+
+    {"budget": 10, "quotas": {"topic": 3},
+     "candidates": [{"doc_id": "...", "topics": ["topic"],
+                     "source": "...", "relevance": 0.9}]}
+
+The command exits `0` when all minima are met and `2` otherwise, so it can
+gate an editorial pipeline.
