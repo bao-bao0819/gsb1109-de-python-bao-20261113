@@ -32,9 +32,14 @@ __version__ = "1.2.1"
 
 __all__ = [
     "Bbox",
+    "BoundTerm",
+    "Bounds",
+    "EvidenceStatus",
     "LngLat",
     "LngLatBbox",
+    "Rollup",
     "Tile",
+    "TileEvidence",
     "bounding_tile",
     "bounds",
     "children",
@@ -44,6 +49,7 @@ __all__ = [
     "parent",
     "quadkey",
     "quadkey_to_tile",
+    "rollup",
     "simplify",
     "tile",
     "tiles",
@@ -945,3 +951,13 @@ def minmax(zoom):
         raise InvalidZoomError("zoom must be a positive integer")
 
     return (0, 2 ** zoom - 1)
+
+
+from mercantile.rollup import (  # noqa: E402
+    BoundTerm,
+    Bounds,
+    EvidenceStatus,
+    Rollup,
+    TileEvidence,
+    rollup,
+)
