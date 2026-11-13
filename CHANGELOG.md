@@ -1,5 +1,20 @@
 # Change log
 
+## Unreleased
+- Added:
+  - `EventClusterTracker` incrementally groups intersecting event records
+    into clusters and keeps cluster identity stable across updates.
+  - `EventRecord` carries a stable source-record id; `ClusterTicket`
+    anchors a work-order ticket to one record.
+  - When a withdrawal splits a cluster, the update reports the old id's
+    lineage in `ClusterUpdate.lineage`, retires the old id, and keeps
+    untouched clusters on their existing identity.
+  - Split pieces get fresh ids. A ticket moves only to the piece that
+    still contains its anchor record; if the anchor was withdrawn, the
+    ticket remains pending for manual assignment.
+  - Replaying an already-applied withdrawal is a reported no-op and does
+    not split clusters again.
+
 ## Version 3.2.2
 - Fixed:
   - Better subclassing support: Determine classes dynamically,

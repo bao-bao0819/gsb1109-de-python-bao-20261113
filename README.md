@@ -129,6 +129,12 @@ Features
 * Pickle-friendly
 * Automatic AVL balancing
 
+* Event clusters
+    * `EventClusterTracker`  (tracks connected components of event records incrementally)
+    * `EventRecord(begin, end, record_id)`  (a source record usable as a tracker record)
+    * `tracker.add(record)` / `tracker.withdraw(record_id)`
+    * `tracker.attach_ticket(ticket_id, anchor)`  (anchors a work order to a source record)
+
 Examples
 --------
 
@@ -339,6 +345,59 @@ Examples
     Interval(5, 10, 'oldlimit: 15, islower: True')
     >>> sorted(t)[1]
     Interval(10, 15, 'oldlimit: 5, islower: False')
+
+    ```
+
+* Event clusters
+
+    Device-abnormality records whose ranges intersect form one event
+    cluster. A tracker keeps cluster identities stable across incremental
+    updates, so a work-order ticket anchored to a record follows its
+    cluster:
+
+    ``` python
+    >>> from intervaltree import EventClusterTracker, EventRecord
+    >>> tracker = EventClusterTracker([
+    ...     EventRecord(0, 10, 'a'),
+    ...     EventRecord(5, 15, 'b'),
+    ...     EventRecord(12, 20, 'c'),
+    ... ])
+    >>> tracker.attach_ticket('WO-1', 'a')
+    ClusterTicket('WO-1', anchor='a', cluster_id='cluster-1')
+
+    ```
+
+    Withdrawing the bridging record splits the cluster. The old id is
+    retired, the two pieces get fresh ids, and the ticket moves to the
+    piece that still contains its anchor:
+
+    ``` python
+    >>> update = tracker.withdraw('b')
+    >>> update.retired
+    ('cluster-1',)
+    >>> update.lineage['cluster-1'] == (
+    ...     tracker.cluster_for('a').cluster_id,
+    ...     tracker.cluster_for('c').cluster_id,
+    ... )
+    True
+    >>> sorted(tracker.cluster_for('a').ticket_ids)
+    ['WO-1']
+    >>> tracker.cluster_for('c').ticket_ids
+    frozenset()
+
+    ```
+
+    If the anchor itself is withdrawn, the ticket stays pending for
+    manual assignment instead of being given to the longest piece.
+    Replaying the same withdrawal does not split anything again:
+
+    ``` python
+    >>> tracker.withdraw('a').pending_tickets[0].pending
+    True
+    >>> tracker.withdraw('b').changes
+    []
+    >>> tracker.withdraw('b').replayed
+    ('b',)
 
     ```
 
