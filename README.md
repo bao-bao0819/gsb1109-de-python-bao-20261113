@@ -68,6 +68,31 @@ order by score desc
 
 You *must* use the `"pcnalx"` matchinfo format string here, or you will get incorrect results. If you see any `math domain` errors in your logs it may be because you did not use exactly the right format string here.
 
+## Counterfactual diff ledgers
+
+The `sqlite_fts4.counterfactual` module helps you review a ranking change offline: capture two snapshots of the same FTS4 query (for example before and after a weights re-tune or a batch of new documents), then replay every combination of three factor groups to see which changes were enough to swap a target document with a specific rival:
+
+- `doc` - the document's own observations (term frequency and document length, always moved together so they stay within one compatible index snapshot)
+- `corpus` - index-wide statistics (row count, average column lengths, document frequencies)
+- `weights` - the BM25 tuning weights `k` and `b`
+
+```python
+import sqlite3
+from sqlite_fts4.counterfactual import collect_snapshot, build_ledger
+
+before = collect_snapshot(old_conn, "articles_fts4", "dog")
+after = collect_snapshot(new_conn, "articles_fts4", "dog", b=1.0)
+
+ledger = build_ledger(before, after, target=117, rival=42)
+ledger.before["leader"]        # who ranked higher in the old snapshot
+ledger.after["leader"]         # who ranks higher now
+ledger.entries                 # scores for every factor combination
+ledger.single_factor_flips     # factors that swap the pair on their own
+ledger.interaction_combos      # combos that only swap the pair together
+```
+
+Each ledger entry reports the re-scored margin between the two documents for one combination of factors drawn from the "after" snapshot. Combinations that flip the ranking only when applied together - where no single factor or smaller combination suffices - are preserved in `interaction_combos`.
+
 ## decode_matchinfo()
 
 SQLite's [built-in matchinfo() function](https://www.sqlite.org/fts3.html#matchinfo) returns results as a binary string. This binary represents a list of 32 bit unsigned integers, but reading the binary results is not particularly human-friendly.

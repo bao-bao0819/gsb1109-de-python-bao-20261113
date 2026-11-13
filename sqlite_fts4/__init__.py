@@ -217,6 +217,36 @@ def rank_score(raw_matchinfo):
     return -score
 
 
+def bm25_score(
+    term_frequency,
+    docs_with_hits,
+    total_row_count,
+    average_num_tokens,
+    num_tokens,
+    k=1.2,
+    b=0.75,
+):
+    "Okapi BM25 contribution of a single phrase/column pair"
+    if average_num_tokens == 0:
+        d = 0
+    else:
+        d = 1 - b + (b * (float(num_tokens) / float(average_num_tokens)))
+
+    # idf = inverse document frequency: is this term rare or common
+    # across our entire corpus?
+    idf = max(
+        math.log((total_row_count - docs_with_hits + 0.5) / (docs_with_hits + 0.5)),
+        0,
+    )
+    denom = term_frequency + (k * d)
+    if denom == 0:
+        rhs = 0
+    else:
+        rhs = (term_frequency * (k + 1)) / denom
+
+    return idf * rhs
+
+
 @wrap_sqlite_function_in_error_logger
 def rank_bm25(raw_match_info):
     "Must be called with output of matchinfo 'pcnalx'"
@@ -239,10 +269,6 @@ def rank_bm25(raw_match_info):
                 "average_num_tokens"
             ]
             num_tokens = match_info["l"]["value"][column_index]["num_tokens"]
-            if average_num_tokens == 0:
-                d = 0
-            else:
-                d = 1 - b + (b * (float(num_tokens) / float(average_num_tokens)))
 
             phrase_column_x = [
                 v
@@ -253,20 +279,14 @@ def rank_bm25(raw_match_info):
             term_frequency = float(phrase_column_x["hits_this_column_this_row"])
             docs_with_hits = float(phrase_column_x["docs_with_hits"])
 
-            # idf = inverse document frequency: is this term rare or common
-            # across our entire corpus?
-            idf = max(
-                math.log(
-                    (total_row_count - docs_with_hits + 0.5) / (docs_with_hits + 0.5)
-                ),
-                0,
+            score += bm25_score(
+                term_frequency,
+                docs_with_hits,
+                total_row_count,
+                average_num_tokens,
+                num_tokens,
+                k,
+                b,
             )
-            denom = term_frequency + (k * d)
-            if denom == 0:
-                rhs = 0
-            else:
-                rhs = (term_frequency * (k + 1)) / denom
-
-            score += idf * rhs
 
     return -score
