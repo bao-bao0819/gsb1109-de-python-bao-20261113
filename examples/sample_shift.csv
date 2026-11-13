@@ -1,0 +1,6 @@
+job_id,start,end,station_type,pinned_station
+J1,0,12,A,A1
+J2,0,12,A,
+J3,12,24,A,
+J4,24,36,A,
+J5,0,40,B,
