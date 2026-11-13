@@ -22,6 +22,19 @@ licence for the benefit of the wider community.
 
 [**See documentation for more details.**](https://github.com/google/textfsm/wiki/TextFSM)
 
+Joining interface traffic to a later snapshot
+---------------------------------------------
+`clitable.JoinInterfaceTraffic(inventory, traffic, hot_swaps=...)` joins a
+traffic table to an earlier interface-number snapshot using the traffic call
+window, serial numbers and explicit insert/remove/replace events. It only
+claims a traffic row when the evidence leaves one possible original board.
+Rows with two possible owners are reported as `ambiguous` with both
+interpretations; rows with no evidence are reported as `unclaimed` and are not
+written into the joined table. `JoinResult.Summary()` always reports all three
+counts, so the number of joined rows cannot hide unresolved traffic. See
+`CliTable.JoinTables()` for the non-mutating form and `CliTable.JoinTraffic()`
+for the in-place form.
+
 Before contributing
 -------------------
 If you are not a Google employee, our lawyers insist that you sign a Contributor

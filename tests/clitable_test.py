@@ -281,5 +281,314 @@ class UnitTestCliTable(unittest.TestCase):
     copy.deepcopy(self.clitable)
 
 
+class UnitTestJoinInterfaceTraffic(unittest.TestCase):
+  """Tests evidence-based interface inventory/traffic joins."""
+
+  def setUp(self):
+    super(UnitTestJoinInterfaceTraffic, self).setUp()
+    self.inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/2, SN-B, 2026-11-14 10:00:00\n'
+    )
+
+  def _Join(self, traffic, inventory=None, hot_swaps=None, **kwargs):
+    return clitable.JoinInterfaceTraffic(
+        inventory or self.inventory, traffic, hot_swaps=hot_swaps, **kwargs
+    )
+
+  def testSingleRowIsClaimedWhenWindowHasOneOwner(self):
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:05:00, 2026-11-14 10:06:00, 100\n'
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual(1, result.table.size)
+    attribution = result.rows[0]
+    self.assertEqual(clitable.CLAIMED, attribution.status)
+    self.assertEqual('SN-A', attribution.serial)
+    self.assertIn('inventory row 1', attribution.evidence)
+
+  def testOneRowCanRemainUnclaimed(self):
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 09:00:00, 2026-11-14 09:01:00, 100\n'
+    )
+    self.assertEqual(0, result.claimed_count)
+    self.assertEqual(1, result.unclaimed_count)
+    self.assertFalse(result.complete)
+    self.assertEqual(0, result.table.size)
+    self.assertEqual('unclaimed', result.rows[0].status)
+
+  def testUnknownTrafficSerialDoesNotUseTimeToHideConflict(self):
+    """Traffic serial absent from inventory must not be guessed from time."""
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets, Serial\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100, SN-Z\n'
+    )
+    self.assertEqual(0, result.claimed_count)
+    self.assertEqual(1, result.unclaimed_count)
+    self.assertEqual('unclaimed', result.rows[0].status)
+
+  def testUnclaimedRowsCanBeKeptAsDiagnostics(self):
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 09:00:00, 2026-11-14 09:01:00, 100\n',
+        include_unclaimed=True,
+    )
+    self.assertEqual(1, result.unclaimed_count)
+    self.assertEqual(1, result.table.size)
+    self.assertEqual('unclaimed', result.table[1]['JoinStatus'])
+    self.assertEqual('', result.table[1]['JoinSerial'])
+
+  def testExplicitTrafficSerialColumn(self):
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Board ID\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, SN-A\n',
+        traffic_serial_column='Board ID',
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual('SN-A', result.table[1]['JoinTrafficSerial'])
+
+  def testOverlappingOwnersProduceTwoInterpretations(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/1, SN-B, 2026-11-14 10:03:00\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:01:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+    )
+    self.assertEqual(1, result.ambiguous_count)
+    self.assertEqual(0, result.claimed_count)
+    self.assertEqual(2, result.table.size)
+    self.assertEqual(
+        ('SN-A', 'SN-B'), tuple(c.serial for c in result.rows[0].candidates)
+    )
+
+  def testTrafficSerialAndTimeConflictKeepsBoth(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/1, SN-B, 2026-11-14 10:03:00\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets, Serial\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100, SN-A\n',
+        inventory=inventory,
+    )
+    self.assertEqual(1, result.ambiguous_count)
+    self.assertEqual(2, len(result.rows[0].candidates))
+    self.assertEqual(
+        ('SN-A', 'SN-B'), tuple(c.serial for c in result.rows[0].candidates)
+    )
+
+  def testInsertEventWithoutRemoveLeavesBothOwners(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    hot_swaps = (
+        'Interface, EventTime, Action, Serial\n'
+        '0/1, 2026-11-14 10:03:00, insert, SN-B\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+        hot_swaps=hot_swaps,
+    )
+    self.assertEqual(1, result.ambiguous_count)
+    self.assertEqual(
+        ('SN-A', 'SN-B'), tuple(c.serial for c in result.rows[0].candidates)
+    )
+
+  def testReplaceEventResolvesReusedNumber(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    hot_swaps = (
+        'Interface, EventTime, Action, OldSerial, NewSerial\n'
+        '0/1, 2026-11-14 10:03:00, replace, SN-A, SN-B\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+        hot_swaps=hot_swaps,
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual('SN-B', result.rows[0].serial)
+    self.assertIn('hot swap replace', result.rows[0].evidence[0])
+
+  def testReplaceBeforeTrafficAndNoLaterInventory(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    hot_swaps = (
+        'Interface, EventTime, Action, Serial\n'
+        '0/1, 2026-11-14 10:03:00, replace, SN-B\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+        hot_swaps=hot_swaps,
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual('SN-B', result.rows[0].serial)
+    self.assertIn('hot swap replace', result.rows[0].evidence[0])
+
+  def testRepeatedIdenticalSnapshotsAreOneOwner(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/1, SN-A, 2026-11-14 10:05:00\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:01:00, 2026-11-14 10:09:00, 100\n',
+        inventory=inventory,
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual(1, len(result.rows[0].candidates))
+
+  def testSerialOutsideWindowIsNotClaimedFromTime(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/1, SN-B, 2026-11-14 10:03:00\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets, Serial\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100, SN-A\n',
+        inventory=inventory,
+    )
+    self.assertEqual(1, result.ambiguous_count)
+    self.assertEqual(0, result.claimed_count)
+
+  def testCollidingTrafficColumnsArePreserved(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    result = self._Join(
+        'Interface, Serial, CallStartWindow, CallEndWindow\n'
+        '0/1, SN-A, 2026-11-14 10:05:00, 2026-11-14 10:06:00\n',
+        inventory=inventory,
+    )
+    self.assertIn('Serial', result.table.header)
+    self.assertIn('Traffic.Serial', result.table.header)
+    self.assertEqual(1, result.claimed_count)
+
+  def testRemoveEventLeavesNumberUnclaimed(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    hot_swaps = (
+        'Interface, EventTime, Action, Serial\n'
+        '0/1, 2026-11-14 10:03:00, remove, SN-A\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:04:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+        hot_swaps=hot_swaps,
+    )
+    self.assertEqual(1, result.unclaimed_count)
+    self.assertEqual(0, result.claimed_count)
+    self.assertEqual(0, result.table.size)
+
+  def testSummaryDoesNotHideUnresolvedRows(self):
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:05:00, 2026-11-14 10:06:00, 100\n'
+        '0/1, 2026-11-14 09:00:00, 2026-11-14 09:01:00, 200\n'
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual(1, result.unclaimed_count)
+    self.assertEqual(2, result.total_count)
+    summary = result.Summary()
+    self.assertEqual(2, summary['traffic_rows'])
+    self.assertEqual(1, summary['claimed'])
+    self.assertEqual(1, summary['unclaimed'])
+    self.assertFalse(summary['complete'])
+    self.assertEqual(1, result.table.size)
+
+  def testPartialWindowCoverageIsNotClaimed(self):
+    inventory = (
+        'Interface, Serial, InventoryTime\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+        '0/1, SN-B, 2026-11-14 10:10:00\n'
+    )
+    result = self._Join(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 09:55:00, 2026-11-14 10:05:00, 100\n',
+        inventory=inventory,
+    )
+    self.assertEqual(1, result.ambiguous_count)
+    self.assertEqual(0, result.claimed_count)
+
+  def testCliTableJoinTrafficUpdatesTable(self):
+    clitable.CliTable.INDEX = {}
+    table = clitable.CliTable()
+    table.header = ('Interface', 'Serial', 'InventoryTime')
+    table.Append(('0/1', 'SN-A', '2026-11-14 10:00:00'))
+    result = table.JoinTraffic(
+        'Interface, CallStartWindow, CallEndWindow, Octets\n'
+        '0/1, 2026-11-14 10:05:00, 2026-11-14 10:06:00, 100\n'
+    )
+    self.assertEqual(1, result.claimed_count)
+    self.assertIn('JoinStatus', table.header)
+    self.assertEqual(1, table.size)
+    self.assertEqual('claimed', table[1]['JoinStatus'])
+
+  def testJoinTablesDoesNotMutateInputs(self):
+    inventory = clitable.CliTable()
+    inventory.header = ('Interface', 'Serial', 'InventoryTime')
+    inventory.Append(('0/1', 'SN-A', '2026-11-14 10:00:00'))
+    traffic = clitable.CliTable()
+    traffic.header = ('Interface', 'CallStartWindow', 'CallEndWindow')
+    traffic.Append(('0/1', '2026-11-14 10:05:00', '2026-11-14 10:06:00'))
+    result = clitable.CliTable.JoinTables(inventory, traffic)
+    self.assertEqual(1, result.claimed_count)
+    self.assertEqual(1, inventory.size)
+    self.assertEqual(1, traffic.size)
+
+  def testExplicitColumnNames(self):
+    inventory = (
+        'Port Name, Board SN, Snapshot At\n'
+        '0/1, SN-A, 2026-11-14 10:00:00\n'
+    )
+    result = self._Join(
+        'Port Name, Window Start, Window End, Octets\n'
+        '0/1, 2026-11-14 10:05:00, 2026-11-14 10:06:00, 100\n',
+        inventory=inventory,
+        interface_column='Port Name',
+        serial_column='Board SN',
+        inventory_time_column='Snapshot At',
+    )
+    self.assertEqual(1, result.claimed_count)
+
+  def testEmptyTrafficReturnsEmptyResult(self):
+    result = self._Join('')
+    self.assertEqual(0, result.total_count)
+    self.assertEqual(0, result.table.size)
+    self.assertTrue(result.complete)
+
+  def testInvalidInventoryLacksSerial(self):
+    with self.assertRaises(clitable.JoinError):
+      self._Join(
+          'Interface, CallStartWindow, CallEndWindow\n'
+          '0/1, 2026-11-14 10:05:00, 2026-11-14 10:06:00\n',
+          inventory='Interface, InventoryTime\n0/1, 2026-11-14 10:00:00\n',
+      )
+
+
 if __name__ == '__main__':
   unittest.main()
