@@ -1,0 +1,15 @@
+{
+  "budget": 12,
+  "points": [
+    {"name": "A-都江堰", "lon": 103.61, "lat": 30.99, "min_zoom": 10, "max_zoom": 13, "weight": 3},
+    {"name": "B-青城山", "lon": 103.57, "lat": 30.90, "min_zoom": 10, "max_zoom": 13, "weight": 2},
+    {"name": "C-成都市区", "lon": 104.07, "lat": 30.67, "min_zoom": 9, "max_zoom": 12, "weight": 4},
+    {"name": "D-双流", "lon": 103.92, "lat": 30.57, "min_zoom": 9, "max_zoom": 12, "weight": 1},
+    {"name": "E-雅安", "lon": 103.01, "lat": 29.98, "min_zoom": 10, "max_zoom": 13, "weight": 2},
+    {"name": "F-泸定", "lon": 102.23, "lat": 29.91, "min_zoom": 11, "max_zoom": 14, "weight": 3},
+    {"name": "G-康定", "lon": 101.96, "lat": 30.05, "min_zoom": 11, "max_zoom": 14, "weight": 2},
+    {"name": "H-峨眉山", "lon": 103.48, "lat": 29.52, "min_zoom": 10, "max_zoom": 12, "weight": 1},
+    {"name": "I-九寨沟", "lon": 103.92, "lat": 33.26, "min_zoom": 9, "max_zoom": 12, "weight": 2},
+    {"name": "J-稻城", "lon": 100.30, "lat": 29.04, "min_zoom": 11, "max_zoom": 13, "weight": 1}
+  ]
+}
