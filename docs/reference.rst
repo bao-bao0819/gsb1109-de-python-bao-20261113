@@ -33,6 +33,14 @@ Classes
    :undoc-members:
 
 
+Backfill drills
+---------------
+
+.. automodule:: schedule.drill
+   :members:
+   :undoc-members:
+
+
 Exceptions
 ----------
 
