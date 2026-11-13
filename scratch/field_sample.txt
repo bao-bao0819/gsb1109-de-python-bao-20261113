@@ -1,0 +1,7 @@
+Device SW-01 role access
+Device SW-01
+Host H-9 type vm
+Device FW-03 role edge
+Device R-05
+Enter detail
+Attr: blade

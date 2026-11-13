@@ -1,0 +1,16 @@
+Value Required DeviceID (\S+)
+Value Role (\S+)
+Value Kind (\S+)
+
+Start
+  ^Device ${DeviceID} role ${Role} -> Record
+  ^Device ${DeviceID}
+  ^Host ${DeviceID} type ${Kind} -> Record
+  ^Enter detail -> Spec
+
+Spec
+  ^Attr: ${Kind}
+  ^\S -> Start
+
+# Null EOF state suppresses the implicit Next.Record at end of input.
+EOF

@@ -1,0 +1,2 @@
+Device SW-01 role access
+Device FW-03 role edge
