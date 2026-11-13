@@ -19,6 +19,7 @@ Command line interface
 					 GeoJSON objects.
 
 	  children       Print the children of the tile.
+	  missing        Find connected regions of missing tiles.
 	  neighbors      Print the neighbors of the tile.
 	  parent         Print the parent tile.
 	  quadkey        Convert to/from quadkeys.
@@ -142,6 +143,40 @@ children
 	Options:
 	  --depth INTEGER  Number of zoom levels to traverse (default is 1).
 	  --help           Show this message and exit.
+
+missing
+-------
+
+The missing command finds connected regions of tiles that are missing from an
+inventory range, one JSON object (a "ticket") per region. Tiles are connected
+through their four edges; the western and eastern edges of the world are
+connected, so a region crossing the antimeridian is reported only once, while
+the northern and southern edges are not. Tiles outside of the inventory range
+are unchecked, not missing. Coverage and region tiles may be compressed with
+parent tiles, and the world is never expanded, so deep zoom levels are cheap.
+
+.. code-block:: console
+
+	$ mercantile missing --help
+	Usage: mercantile missing [OPTIONS] [ZOOM] [INPUT]
+
+	  Find connected regions of tiles missing from an inventory range at ZOOM
+	  level. Coverage tiles are read from stdin and the inventory range is
+	  given with --region options. Input tiles may be compressed: a tile with
+	  a zoom level less than ZOOM stands for all of its descendants at ZOOM.
+	  Output is a JSON object with the area and the western and eastern
+	  boundary tiles of each region.
+
+	  Example:
+
+	  echo "[0, 0, 2]" | mercantile missing 2 --region "[0, 0, 1]"
+	  {"area": 3, "east": [1, 0, 2], "west": [0, 1, 2]}
+
+	Options:
+	  --region TEXT  An [x, y, z] tile of the inventory range. May be used
+					 multiple times.  [required]
+	  --seq / --lf   Write a RS-delimited JSON sequence (default is LF).
+	  --help         Show this message and exit.
 
 neighbors
 ---------

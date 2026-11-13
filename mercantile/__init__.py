@@ -34,12 +34,14 @@ __all__ = [
     "Bbox",
     "LngLat",
     "LngLatBbox",
+    "MissingRegion",
     "Tile",
     "bounding_tile",
     "bounds",
     "children",
     "feature",
     "lnglat",
+    "missing_regions",
     "neighbors",
     "parent",
     "quadkey",
@@ -109,6 +111,22 @@ Attributes
 left, bottom, right, top : float
     Bounding values in meters.
 """
+
+
+class MissingRegion(namedtuple("MissingRegion", ["area", "west", "east"])):
+    """A connected region of missing tiles within an inventory range
+
+    Attributes
+    ----------
+    area : int
+        Number of tiles in the region.
+    west, east : Tile
+        A locatable tile on the region's western and eastern boundary.
+        For a region crossing the antimeridian (the seam between the
+        maximum and minimum x indexes), west and east are on opposite
+        sides of the seam.
+
+    """
 
 
 class MercantileError(Exception):
@@ -721,6 +739,135 @@ def simplify(tiles):
     while is_merging:
         root_set, is_merging = merge(root_set)
     return root_set
+
+
+def missing_regions(coverage, zoom, region):
+    """Find connected regions of missing tiles within an inventory range
+
+    Tiles of the inventory *region* that are not covered by *coverage*
+    are missing. Missing tiles are grouped into regions connected
+    through their four edges. The western and eastern edges of the
+    world are connected, so a region may cross the antimeridian and is
+    reported only once; the northern and southern edges are not
+    connected. Tiles outside of the inventory region are unchecked, not
+    missing.
+
+    Coverage and region tiles may be compressed: a tile with a zoom
+    level less than *zoom* stands for all of its descendants at *zoom*.
+    Only the inventory region is expanded to *zoom*; the coverage and
+    the rest of the world are never expanded, so deep zoom levels are
+    cheap.
+
+    Parameters
+    ----------
+    coverage : iterable of Tile or sequence of int
+        Tiles that are present. May mix zoom levels less than or equal
+        to *zoom*.
+    zoom : int
+        The inventory zoom level.
+    region : iterable of Tile or sequence of int
+        The inventory range. May mix zoom levels less than or equal to
+        *zoom*.
+
+    Returns
+    -------
+    list of MissingRegion
+        Sorted by western boundary tile.
+
+    Raises
+    ------
+    InvalidZoomError
+        If a coverage or region tile is deeper than *zoom*.
+
+    Examples
+    --------
+    >>> missing_regions([[0, 0, 2], [1, 0, 2], [0, 1, 2]], 2, [[0, 0, 1]])
+    [MissingRegion(area=1, west=Tile(x=1, y=1, z=2), east=Tile(x=1, y=1, z=2))]
+
+    """
+    lo, hi = minmax(zoom)
+    width = hi + 1
+
+    def expand(tile, kind):
+        tile = _parse_tile_arg(tile)
+        if tile.z > zoom:
+            raise InvalidZoomError(
+                "{} tiles must have a zoom level <= the inventory zoom".format(kind)
+            )
+        return tile
+
+    # Expand the inventory region to the target zoom level.
+    inventory = set()
+    for tile in region:
+        tile = expand(tile, "region")
+        shift = zoom - tile.z
+        x0, y0 = tile.x << shift, tile.y << shift
+        for x in range(x0, x0 + (1 << shift)):
+            for y in range(y0, y0 + (1 << shift)):
+                inventory.add((x, y))
+
+    # Index coverage by zoom level so that membership can be tested
+    # through ancestors without expanding anything.
+    covered = {}
+    for tile in coverage:
+        tile = expand(tile, "coverage")
+        covered.setdefault(tile.z, set()).add((tile.x, tile.y))
+
+    def is_covered(x, y):
+        for z, tiles in covered.items():
+            if (x >> (zoom - z), y >> (zoom - z)) in tiles:
+                return True
+        return False
+
+    missing = {xy for xy in inventory if not is_covered(*xy)}
+
+    # Group missing tiles into regions connected through their four
+    # edges. x indexes wrap around the antimeridian; y indexes do not
+    # wrap around the poles.
+    regions = []
+    while missing:
+        seed = missing.pop()
+        component = {seed}
+        stack = [seed]
+        while stack:
+            x, y = stack.pop()
+            adjacent = [((x - 1) % width, y), ((x + 1) % width, y)]
+            if y > 0:
+                adjacent.append((x, y - 1))
+            if y < hi:
+                adjacent.append((x, y + 1))
+            for neighbor in adjacent:
+                if neighbor in missing:
+                    missing.discard(neighbor)
+                    component.add(neighbor)
+                    stack.append(neighbor)
+
+        # Unwrap x indexes at the largest gap so that a region crossing
+        # the antimeridian is described contiguously.
+        xs = sorted({x for x, y in component})
+        cut, gap = xs[-1], xs[0] + width - xs[-1]
+        for a, b in zip(xs, xs[1:]):
+            if b - a > gap:
+                cut, gap = a, b - a
+
+        def unwrap(x):
+            return x if x > cut else x + width
+
+        west = min(component, key=lambda t: (unwrap(t[0]), t[1]))
+        east = max(component, key=lambda t: (unwrap(t[0]), -t[1]))
+        regions.append(
+            (
+                unwrap(west[0]),
+                west[1],
+                MissingRegion(
+                    area=len(component),
+                    west=Tile(west[0], west[1], zoom),
+                    east=Tile(east[0], east[1], zoom),
+                ),
+            )
+        )
+
+    return [region for _, _, region in sorted(regions)]
 
 
 def rshift(val, n):

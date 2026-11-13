@@ -370,3 +370,44 @@ def test_cli_quadkey_from_mixed():
     result = runner.invoke(cli, ["quadkey"], "0313102310\n[6826, 12415, 15]\n")
     assert result.exit_code == 0
     assert result.output == "[486, 332, 10]\n023101012323232\n"
+
+
+def test_cli_missing_requires_region():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["missing", "2"], "[0, 0, 2]")
+    assert result.exit_code == 2
+
+
+def test_cli_missing():
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["missing", "2", "--region", "[0, 0, 1]"],
+        "[0, 0, 2]\n[1, 0, 2]\n[0, 1, 2]\n",
+    )
+    assert result.exit_code == 0
+    assert result.output == '{"area": 1, "east": [1, 1, 2], "west": [1, 1, 2]}\n'
+
+
+def test_cli_missing_seam():
+    """A region crossing the antimeridian gets a single ticket"""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["missing", "2", "--region", "[3, 0, 2]", "--region", "[0, 0, 2]"],
+        "",
+    )
+    assert result.exit_code == 0
+    assert result.output == '{"area": 2, "east": [0, 0, 2], "west": [3, 0, 2]}\n'
+
+
+def test_cli_missing_compressed():
+    """Coverage and region tiles may be compressed with parent tiles"""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["missing", "3", "--region", "[0, 0, 1]"],
+        "[0, 0, 2]\n[1, 0, 2]\n[0, 1, 2]\n",
+    )
+    assert result.exit_code == 0
+    assert result.output == '{"area": 4, "east": [3, 2, 3], "west": [2, 2, 3]}\n'

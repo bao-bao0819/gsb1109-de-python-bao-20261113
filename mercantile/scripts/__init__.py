@@ -526,6 +526,63 @@ def neighbors(ctx, input):
             click.echo(output)
 
 
+# The missing command.
+@cli.command(short_help="Find connected regions of missing tiles.")
+# Mandatory Mercator zoom level argument.
+@click.argument("zoom", type=int, default=-1)
+# This input is either a filename, stdin, or a string.
+# Has to follow the zoom arg.
+@click.argument("input", default="-", required=False)
+# The inventory range, one [x, y, z] tile per use of the option.
+@click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    required=True,
+    help="An [x, y, z] tile of the inventory range. "
+    "May be used multiple times.",
+)
+@click.option(
+    "--seq/--lf",
+    default=False,
+    help="Write a RS-delimited JSON sequence (default is LF).",
+)
+@click.pass_context
+def missing(ctx, zoom, input, regions, seq):
+    """Find connected regions of tiles missing from an inventory range
+    at ZOOM level. Coverage tiles are read from stdin and the inventory
+    range is given with --region options. Input tiles may be
+    compressed: a tile with a zoom level less than ZOOM stands for all
+    of its descendants at ZOOM. Output is a JSON object with the area
+    and the western and eastern boundary tiles of each region.
+
+    Example:
+
+    \b
+    echo "[0, 0, 2]" | mercantile missing 2 --region "[0, 0, 1]"
+    {"area": 3, "east": [1, 0, 2], "west": [0, 1, 2]}
+
+    """
+    region_tiles = [json.loads(r)[:3] for r in regions]
+    coverage = []
+    src = normalize_input(input)
+    for line in iter_lines(src):
+        coverage.append(json.loads(line)[:3])
+
+    for region in mercantile.missing_regions(coverage, zoom, region_tiles):
+        output = json.dumps(
+            {
+                "area": region.area,
+                "west": list(region.west),
+                "east": list(region.east),
+            },
+            sort_keys=True,
+        )
+        if seq:
+            click.echo(RS)
+        click.echo(output)
+
+
 @cli.command(short_help="Convert to/from quadkeys.")
 @click.argument("input", default="-", required=False)
 @click.pass_context

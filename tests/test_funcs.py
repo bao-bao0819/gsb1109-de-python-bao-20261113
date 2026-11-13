@@ -578,3 +578,91 @@ def test_geojson_bounds(obj):
 def test_xy_future_warnings(x, y):
     with pytest.warns(FutureWarning):
         mercantile.Tile(x, y, 0)
+
+
+def test_missing_regions_single_hole():
+    """One uncovered tile in the inventory range is one region"""
+    regions = mercantile.missing_regions(
+        [[0, 0, 2], [1, 0, 2], [0, 1, 2]], 2, [[0, 0, 1]]
+    )
+    assert regions == [
+        mercantile.MissingRegion(
+            area=1, west=mercantile.Tile(1, 1, 2), east=mercantile.Tile(1, 1, 2)
+        )
+    ]
+
+
+def test_missing_regions_diagonal_not_connected():
+    """Tiles touching only at a corner are separate regions"""
+    regions = mercantile.missing_regions([[0, 0, 2], [1, 1, 2]], 2, [[0, 0, 1]])
+    assert regions == [
+        mercantile.MissingRegion(
+            area=1, west=mercantile.Tile(0, 1, 2), east=mercantile.Tile(0, 1, 2)
+        ),
+        mercantile.MissingRegion(
+            area=1, west=mercantile.Tile(1, 0, 2), east=mercantile.Tile(1, 0, 2)
+        ),
+    ]
+
+
+def test_missing_regions_compressed():
+    """Compressed coverage and region tiles are expanded to the target zoom"""
+    regions = mercantile.missing_regions(
+        [[0, 0, 2], [1, 0, 2], [0, 1, 2]], 3, [[0, 0, 1]]
+    )
+    assert regions == [
+        mercantile.MissingRegion(
+            area=4, west=mercantile.Tile(2, 2, 3), east=mercantile.Tile(3, 2, 3)
+        )
+    ]
+
+
+def test_missing_regions_crosses_seam():
+    """A region crossing the antimeridian is reported only once"""
+    regions = mercantile.missing_regions([], 2, [[3, 0, 2], [0, 0, 2]])
+    assert regions == [
+        mercantile.MissingRegion(
+            area=2, west=mercantile.Tile(3, 0, 2), east=mercantile.Tile(0, 0, 2)
+        )
+    ]
+
+
+def test_missing_regions_no_polar_wrap():
+    """The northern and southern edges of the world are not connected"""
+    regions = mercantile.missing_regions([], 2, [[0, 0, 2], [0, 3, 2]])
+    assert len(regions) == 2
+    assert all(region.area == 1 for region in regions)
+
+
+def test_missing_regions_outside_range_unchecked():
+    """Uncovered tiles outside the inventory range are not missing"""
+    regions = mercantile.missing_regions([[0, 0, 1]], 1, [[0, 0, 1], [1, 0, 1]])
+    assert regions == [
+        mercantile.MissingRegion(
+            area=1, west=mercantile.Tile(1, 0, 1), east=mercantile.Tile(1, 0, 1)
+        )
+    ]
+
+
+def test_missing_regions_deep_zoom():
+    """Deep zoom levels do not expand the coverage or the world"""
+    regions = mercantile.missing_regions([[0, 0, 14]], 20, [[0, 0, 13]])
+    assert regions == [
+        mercantile.MissingRegion(
+            area=12288,
+            west=mercantile.Tile(0, 64, 20),
+            east=mercantile.Tile(127, 0, 20),
+        )
+    ]
+
+
+def test_missing_regions_full_coverage():
+    """No missing tiles means no regions"""
+    assert mercantile.missing_regions([[0, 0, 1]], 2, [[0, 0, 1]]) == []
+
+
+@pytest.mark.parametrize("coverage,region", [([[0, 0, 3]], [[0, 0, 1]]), ([[0, 0, 1]], [[0, 0, 3]])])
+def test_missing_regions_invalid_zoom(coverage, region):
+    """Coverage and region tiles may not be deeper than the inventory zoom"""
+    with pytest.raises(mercantile.InvalidZoomError):
+        mercantile.missing_regions(coverage, 2, region)

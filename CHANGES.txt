@@ -1,6 +1,15 @@
 Changes
 =======
 
+Next
+----
+
+- New ``mercantile.missing_regions`` function and ``mercantile missing`` CLI
+  command find connected regions of missing tiles within an inventory range.
+  Coverage and range may be compressed with parent tiles, regions connect
+  across the antimeridian but not across the poles, and each region is
+  reported with its area and western and eastern boundary tiles.
+
 1.2.1 (2021-04-21)
 ------------------
 
