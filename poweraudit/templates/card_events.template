@@ -1,0 +1,9 @@
+Value Time (\S+)
+Value Slot (\S+)
+Value Action (\S+)
+Value Model (.*)
+
+Start
+  ^Card insert/remove events
+  ^TIME\s+SLOT\s+ACTION(\s+MODEL)?
+  ^${Time}\s+${Slot}\s+${Action}\s*${Model}\s*$$ -> Record

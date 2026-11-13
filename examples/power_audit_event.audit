@@ -1,0 +1,15 @@
+# Event-driven case: model W's two columns match while seated, so full-load
+# snapshots cannot separate the relations.  Removing the card at t=2 and
+# watching the chassis total fall settles it: counting both columns would
+# require an impossible overhead, so W must be one sensor with two names.
+
+[chassis]
+1, 110.0, 1.0
+2, 100.0, 1.0
+
+[cards]
+1, 1, W, 10.0, 10.0, 0.3
+
+[events]
+1, 1, INSERT, W
+2, 1, REMOVE

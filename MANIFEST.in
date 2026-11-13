@@ -4,3 +4,4 @@ include *.txt
 recursive-include tests *.py
 recursive-include examples *
 recursive-include testdata *
+recursive-include poweraudit *.template

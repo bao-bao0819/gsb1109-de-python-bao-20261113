@@ -1,0 +1,7 @@
+Slot power readings
+TIME  SLOT  MODEL  RAIL1_W  RAIL2_W  TOL_W
+1     1     X      10.0     10.2     0.2
+1     2     Y      20.0     30.0     0.2
+2     1     X      15.0     15.1     0.2
+2     2     Y      20.0     30.0     0.2
+3     1     X      15.0     15.1     0.2

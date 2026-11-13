@@ -1,0 +1,5 @@
+Chassis power history
+TIME       TOTAL_W  TOL_W
+1          170.2    0.5
+2          180.1    0.5
+3          130.1    0.5

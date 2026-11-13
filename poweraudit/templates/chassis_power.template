@@ -1,0 +1,8 @@
+Value Time (\S+)
+Value Total (\S+)
+Value Tolerance (\S+)
+
+Start
+  ^Chassis power history
+  ^TIME\s+TOTAL_W\s+TOL_W
+  ^${Time}\s+${Total}\s+${Tolerance}\s*$$ -> Record

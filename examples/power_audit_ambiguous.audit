@@ -1,0 +1,18 @@
+# Ambiguous case: model Z publishes identical columns and the load never
+# changes, so both relations fit every total and no recorded change can
+# separate them.  The t=3 row has one missing channel (N/A): it stays
+# missing and is never zero filled, so that chassis sample is simply
+# unverifiable for the two-rail interpretation.
+
+[chassis]
+1, 112.0, 1.0
+2, 112.0, 1.0
+3, 112.0, 1.0
+
+[cards]
+1, 1, Z, 12.0, 12.0, 0.5
+2, 1, Z, 12.0, 12.0, 0.5
+3, 1, Z, 12.0, N/A, 0.5
+
+[events]
+1, 1, INSERT, Z

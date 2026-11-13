@@ -1,0 +1,25 @@
+# Decisive case: model X keeps two near-equal columns so both relations
+# survive full-load snapshots; the load change at t=2 separates them.
+# Model Y's columns disagree, which rules ALIAS out directly.
+#
+# Columns:
+# [chassis] time, total_w, tolerance_w
+# [cards]   time, slot, model, rail1_w, rail2_w, tolerance_w
+# [events]  time, slot, action, model
+
+[chassis]
+1, 170.2, 0.5
+2, 180.1, 0.5
+3, 130.1, 0.5
+
+[cards]
+1, 1, X, 10.0, 10.2, 0.2
+1, 2, Y, 20.0, 30.0, 0.2
+2, 1, X, 15.0, 15.1, 0.2
+2, 2, Y, 20.0, 30.0, 0.2
+3, 1, X, 15.0, 15.1, 0.2
+
+[events]
+1, 1, INSERT, X
+1, 2, INSERT, Y
+3, 2, REMOVE

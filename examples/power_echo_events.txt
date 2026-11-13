@@ -1,0 +1,5 @@
+Card insert/remove events
+TIME  SLOT  ACTION  MODEL
+1     1     INSERT  X
+1     2     INSERT  Y
+3     2     REMOVE

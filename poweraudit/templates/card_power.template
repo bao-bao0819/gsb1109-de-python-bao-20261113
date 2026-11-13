@@ -1,0 +1,11 @@
+Value Time (\S+)
+Value Slot (\S+)
+Value Model (\S+)
+Value RailA (\S+)
+Value RailB (\S+)
+Value Tolerance (\S+)
+
+Start
+  ^Slot power readings
+  ^TIME\s+SLOT\s+MODEL\s+RAIL1_W\s+RAIL2_W\s+TOL_W
+  ^${Time}\s+${Slot}\s+${Model}\s+${RailA}\s+${RailB}\s+${Tolerance}\s*$$ -> Record
