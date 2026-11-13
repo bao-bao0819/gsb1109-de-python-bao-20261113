@@ -34,11 +34,20 @@ from pygeoif.geometry import MultiPoint
 from pygeoif.geometry import MultiPolygon
 from pygeoif.geometry import Point
 from pygeoif.geometry import Polygon
+from pygeoif.identity import Correspondence
+from pygeoif.identity import IdentityMatch
+from pygeoif.identity import IdentityVerdict
+from pygeoif.identity import RingCorrespondence
+from pygeoif.identity import VertexAlignment
+from pygeoif.identity import compare_identity
 
 __all__ = [
+    "Correspondence",
     "Feature",
     "FeatureCollection",
     "GeometryCollection",
+    "IdentityMatch",
+    "IdentityVerdict",
     "LineString",
     "LinearRing",
     "MultiLineString",
@@ -46,6 +55,9 @@ __all__ = [
     "MultiPolygon",
     "Point",
     "Polygon",
+    "RingCorrespondence",
+    "VertexAlignment",
+    "compare_identity",
     "force_2d",
     "force_3d",
     "from_wkt",

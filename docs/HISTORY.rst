@@ -4,6 +4,14 @@ Changelog
 1.7.0 (unreleased)
 --------------------
 
+- add ``pygeoif.identity.compare_identity``, an auditable geometric identity
+  comparison: rings compare up to rotation and reversal, holes and multi-part
+  members up to permutation, an optional quantization grid absorbs
+  transcription noise, and quantization that collapses a ring (for example a
+  narrow hole pressed into a line) yields an ``UNDECIDABLE`` verdict instead
+  of a false equivalence. Identical results report how the rings and vertices
+  of both geometries correspond, including multiple correspondences caused by
+  repeated vertices or repeated rings.
 
 
 1.6.0 (2025/10/01)
