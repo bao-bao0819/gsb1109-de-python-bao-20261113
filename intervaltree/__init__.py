@@ -23,3 +23,4 @@ limitations under the License.
 """
 from .interval import Interval
 from .intervaltree import IntervalTree
+from .probetracker import ProbeTracker

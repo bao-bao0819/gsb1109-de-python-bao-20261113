@@ -128,6 +128,11 @@ Features
 
 * Pickle-friendly
 * Automatic AVL balancing
+* `ProbeTracker` (a companion class for peak-concurrency queries over
+  online/offline intervals: counts distinct `data` values online at a
+  single instant within any query window, returns all periods attaining
+  the maximum, and tolerates duplicate heartbeats and late revocations
+  via reference counting)
 
 Examples
 --------
