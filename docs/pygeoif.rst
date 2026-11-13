@@ -42,6 +42,14 @@ pygeoif.functions module
    :undoc-members:
    :show-inheritance:
 
+pygeoif.sectioning module
+-------------------------
+
+.. automodule:: pygeoif.sectioning
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pygeoif.exceptions module
 -------------------------
 

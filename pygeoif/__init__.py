@@ -34,18 +34,28 @@ from pygeoif.geometry import MultiPoint
 from pygeoif.geometry import MultiPolygon
 from pygeoif.geometry import Point
 from pygeoif.geometry import Polygon
+from pygeoif.sectioning import BaselineSectioner
+from pygeoif.sectioning import Match
+from pygeoif.sectioning import NearestPoint
+from pygeoif.sectioning import Section
+from pygeoif.sectioning import Tangent
 
 __all__ = [
+    "BaselineSectioner",
     "Feature",
     "FeatureCollection",
     "GeometryCollection",
     "LineString",
     "LinearRing",
+    "Match",
     "MultiLineString",
     "MultiPoint",
     "MultiPolygon",
+    "NearestPoint",
     "Point",
     "Polygon",
+    "Section",
+    "Tangent",
     "force_2d",
     "force_3d",
     "from_wkt",

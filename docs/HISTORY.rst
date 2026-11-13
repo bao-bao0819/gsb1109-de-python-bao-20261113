@@ -4,6 +4,11 @@ Changelog
 1.7.0 (unreleased)
 --------------------
 
+- add the ``pygeoif.sectioning`` module to reconstruct sampling cross-sections
+  from station/offset records along a ``LineString`` or ``LinearRing`` baseline,
+  including incoming/outgoing tangent conventions at turn vertices and
+  chainage-window lookups that keep folded parallel branches apart.
+
 
 
 1.6.0 (2025/10/01)
