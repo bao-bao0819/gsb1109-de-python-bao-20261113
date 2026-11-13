@@ -8,6 +8,7 @@ import sys
 import click
 
 import mercantile
+import mercantile.coverage
 
 
 def configure_logging(verbosity):
@@ -561,3 +562,104 @@ def quadkey(ctx, input):
             click.echo(output)
     except mercantile.QuadKeyError:
         raise click.BadParameter("{0}".format(input), param=input, param_hint="input")
+
+
+# The coverage command.
+@cli.command(
+    short_help="Reconcile spherical-area and tile-count coverage.",
+)
+@click.argument("total", default="-", required=False)
+@click.option(
+    "--surveyed",
+    "surveyed_path",
+    required=True,
+    help="File containing surveyed tiles, one JSON record per line.",
+)
+@click.option(
+    "--count-zoom",
+    type=int,
+    default=None,
+    help="Zoom level for the tile-count basis (default: max zoom in total).",
+)
+@click.option(
+    "--count-partial",
+    type=click.Choice(["tile", "clip"]),
+    default="tile",
+    show_default=True,
+    help="Count a latitude-clipped tile as a whole tile or only its clipped part.",
+)
+@click.option(
+    "--radius",
+    type=float,
+    default=mercantile.RE,
+    show_default=True,
+    help="Sphere radius in metres.",
+)
+@click.option(
+    "--top",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Number of largest contributors to report.",
+)
+@click.option(
+    "--indent",
+    type=int,
+    default=None,
+    help="Indentation level for JSON output.",
+)
+@click.pass_context
+def coverage(
+    ctx, total, surveyed_path, count_zoom, count_partial, radius, top, indent
+):
+    """Reconcile tile-count and spherical-area coverage.
+
+    TOTAL is a file (or "-" for stdin) containing the full survey region,
+    one record per line. Surveyed tiles are read from --surveyed. Each
+    line is a JSON array [x, y, z] or an object with a "tile" array and
+    optional "south", "north", and "label" members. Records may mix zoom
+    levels and may be clipped at a latitude.
+
+    Example:
+
+    \b
+    $ echo '[0, 0, 2]' | mercantile coverage - --surveyed surveyed.json
+    {"area_coverage": 0.0397, ..., "contributions": [...]}
+
+    """
+    total_lines = normalize_input(total)
+    surveyed_lines = normalize_input(surveyed_path)
+
+    total_records = _read_coverage_records(total_lines)
+    surveyed_records = _read_coverage_records(surveyed_lines)
+
+    try:
+        report = mercantile.coverage.coverage_report(
+            total_records,
+            surveyed_records,
+            count_zoom=count_zoom,
+            count_partial=count_partial,
+            radius=radius,
+        )
+    except mercantile.coverage.CoverageError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(
+        json.dumps(
+            report.as_dict(top=top),
+            indent=indent,
+            sort_keys=True,
+        )
+    )
+
+
+def _read_coverage_records(lines):
+    records = []
+    for line in iter_lines(lines):
+        try:
+            records.append(json.loads(line))
+        except ValueError as exc:
+            raise click.BadParameter(
+                "{0}".format(line), param_hint="input"
+            )
+    return records

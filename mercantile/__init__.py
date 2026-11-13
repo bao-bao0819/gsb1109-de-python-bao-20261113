@@ -50,6 +50,12 @@ __all__ = [
     "ul",
     "xy_bounds",
     "minmax",
+    "CoverageTile",
+    "CoverageReport",
+    "Contribution",
+    "CoverageError",
+    "coverage_report",
+    "spherical_area",
 ]
 
 
@@ -945,3 +951,14 @@ def minmax(zoom):
         raise InvalidZoomError("zoom must be a positive integer")
 
     return (0, 2 ** zoom - 1)
+
+
+# Imported last: mercantile.coverage imports names defined above.
+from .coverage import (  # noqa: E402
+    CoverageError,
+    CoverageReport,
+    CoverageTile,
+    Contribution,
+    coverage_report,
+    spherical_area,
+)

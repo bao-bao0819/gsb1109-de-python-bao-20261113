@@ -80,6 +80,7 @@ that intersect with a GeoJSON bounding box.
 	  bounding-tile  Print the bounding tile of a lng/lat point, bounding box, or
 					 GeoJSON objects.
 	  children       Print the children of the tile.
+	  coverage       Reconcile spherical-area and tile-count coverage.
 	  neighbors      Print the neighbors of the tile.
 	  parent         Print the parent tile.
 	  quadkey        Convert to/from quadkeys.

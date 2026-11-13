@@ -370,3 +370,127 @@ def test_cli_quadkey_from_mixed():
     result = runner.invoke(cli, ["quadkey"], "0313102310\n[6826, 12415, 15]\n")
     assert result.exit_code == 0
     assert result.output == "[486, 332, 10]\n023101012323232\n"
+
+
+def test_cli_coverage():
+    """The coverage command reports both bases and contributions."""
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        with open("total.json", "w") as src:
+            src.write("\n".join(["[0, 0, 2]", "[1, 0, 2]", "[0, 3, 2]"]))
+        with open("surveyed.json", "w") as src:
+            src.write("\n".join(["[0, 0, 2]"]))
+
+        result = runner.invoke(
+            cli,
+            [
+                "coverage",
+                "total.json",
+                "--surveyed",
+                "surveyed.json",
+                "--top",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["count_zoom"] == 2
+    assert data["count_partial"] == "tile"
+    assert data["count_coverage"] < data["area_coverage"]
+    assert len(data["contributions"]) == 1
+    assert data["contributions"][0]["rank"] == 1
+
+
+def test_cli_coverage_clipped_records():
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        with open("total.json", "w") as src:
+            src.write(
+                json.dumps(
+                    {
+                        "tile": [0, 0, 1],
+                        "south": 0,
+                        "north": 40,
+                        "label": "north",
+                    }
+                )
+            )
+        with open("surveyed.json", "w") as src:
+            src.write(
+                json.dumps(
+                    {
+                        "tile": [0, 0, 1],
+                        "south": 0,
+                        "north": 20,
+                        "label": "north",
+                    }
+                )
+            )
+
+        result = runner.invoke(
+            cli,
+            [
+                "coverage",
+                "total.json",
+                "--surveyed",
+                "surveyed.json",
+                "--count-partial",
+                "clip",
+            ],
+        )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert 0.0 < data["area_coverage"] < 1.0
+    assert data["contributions"][0]["label"] == "north"
+
+
+def test_cli_coverage_bad_record():
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        with open("total.json", "w") as src:
+            src.write('{"foo": 1}')
+        with open("surveyed.json", "w") as src:
+            src.write("[0, 0, 2]")
+
+        result = runner.invoke(
+            cli, ["coverage", "total.json", "--surveyed", "surveyed.json"]
+        )
+
+    assert result.exit_code != 0
+
+
+def test_cli_coverage_clip_count():
+    """The clip count basis makes coverage summable across zoom levels."""
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        with open("total.json", "w") as src:
+            src.write("[0, 0, 1]")
+        with open("surveyed.json", "w") as src:
+            src.write(
+                json.dumps({"tile": [0, 0, 1], "south": 0, "north": 40})
+            )
+
+        result = runner.invoke(
+            cli,
+            [
+                "coverage",
+                "total.json",
+                "--surveyed",
+                "surveyed.json",
+                "--count-partial",
+                "clip",
+            ],
+        )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["count_coverage"] < 1.0
+    assert data["area_coverage"] < 1.0
+
+
+def test_cli_coverage_requires_surveyed():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["coverage", "-"], "[0, 0, 0]")
+    assert result.exit_code != 0

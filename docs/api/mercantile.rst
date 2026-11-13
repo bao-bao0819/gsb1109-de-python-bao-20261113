@@ -15,5 +15,6 @@ Subpackages
 
 .. toctree::
 
+    mercantile.coverage
     mercantile.scripts
 

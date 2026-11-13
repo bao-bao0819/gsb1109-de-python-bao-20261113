@@ -19,6 +19,7 @@ Command line interface
 					 GeoJSON objects.
 
 	  children       Print the children of the tile.
+	  coverage       Reconcile spherical-area and tile-count coverage.
 	  neighbors      Print the neighbors of the tile.
 	  parent         Print the parent tile.
 	  quadkey        Convert to/from quadkeys.
@@ -326,3 +327,38 @@ When supplying GeoJSON as input, you may need to first compact with the help of 
 .. code-block:: console
 
     $ cat input.geojson | jq -c . | mercantile tiles 14
+
+coverage
+--------
+
+The coverage command reconciles the traditional tile-count coverage with
+spherical-area coverage. TOTAL is a file or ``-`` for stdin; surveyed tiles
+come from ``--surveyed``. Each line is a JSON array ``[x, y, z]`` or an
+object with a ``tile`` array and optional ``south``, ``north``, and
+``label`` members. Records may mix zoom levels and may be clipped at a
+latitude.
+
+.. code-block:: console
+
+	$ printf '[0,0,2]\n[1,0,2]\n[0,1,2]\n[1,1,2]\n' > total.json
+	$ printf '[0,0,2]\n[1,0,2]\n' > surveyed.json
+	$ mercantile coverage total.json --surveyed surveyed.json
+	{"area_coverage": 0.0794, ..., "count_coverage": 0.5, "difference_pp": -42.06, ...}
+
+The output reports both coverages, their difference in percentage points,
+and a ``contributions`` array sorted by absolute difference. Each entry
+carries the region's ``area_share`` and ``count_share``, so the gap can be
+traced to the region that contributes most to it.
+
+Options:
+
+.. code-block:: console
+
+	--surveyed PATH           File of surveyed tiles (required).
+	--count-zoom INTEGER      Zoom level for the tile-count basis.
+	--count-partial [tile|clip]
+	                          Count a latitude-clipped tile as a whole tile
+	                          (default) or only its clipped part.
+	--radius FLOAT            Sphere radius in metres (default 6378137.0).
+	--top INTEGER             Number of largest contributors to report.
+	--indent INTEGER          Indentation level for JSON output.
