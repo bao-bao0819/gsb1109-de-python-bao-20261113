@@ -32,6 +32,7 @@ __version__ = "1.2.1"
 
 __all__ = [
     "Bbox",
+    "LicenseCatalog",
     "LngLat",
     "LngLatBbox",
     "Tile",
@@ -39,6 +40,7 @@ __all__ = [
     "bounds",
     "children",
     "feature",
+    "license_catalog",
     "lnglat",
     "neighbors",
     "parent",
@@ -108,6 +110,23 @@ Attributes
 ----------
 left, bottom, right, top : float
     Bounding values in meters.
+"""
+
+
+LicenseCatalog = namedtuple("LicenseCatalog", ["full", "partial", "none"])
+"""A tiered catalog of tiles classified by license coverage
+
+Attributes
+----------
+full : list of Tile
+    Tiles completely covered by the union of the license rectangles.
+    These are the only tiles that may be collected.
+partial : list of Tile
+    Tiles intersected by the union of the license rectangles with
+    non-zero area, but not completely covered.
+none : list of Tile
+    Tiles with no area in common with any license rectangle. Licenses
+    that only touch a tile along a shared boundary do not count.
 """
 
 
@@ -545,6 +564,127 @@ def tiles(west, south, east, north, zooms, truncate=False):
             for i in range(ul_tile.x, lr_tile.x + 1):
                 for j in range(ul_tile.y, lr_tile.y + 1):
                     yield Tile(i, j, z)
+
+
+def _split_license(west, south, east, north):
+    """Split a license bbox at the antimeridian
+
+    A license with west > east crosses the antimeridian and is split
+    into one rectangle on each side of the longitude seam. Rectangles
+    are clamped to [-180, 180] longitude and empty slivers are dropped.
+
+    Parameters
+    ----------
+    west, south, east, north : float
+        Bounding values in decimal degrees.
+
+    Returns
+    -------
+    list of (west, south, east, north) tuples
+
+    """
+    if west > east:
+        parts = [(west, south, 180.0, north), (-180.0, south, east, north)]
+    else:
+        parts = [(west, south, east, north)]
+
+    rects = []
+    for w, s, e, n in parts:
+        w = max(-180.0, w)
+        e = min(180.0, e)
+        if w < e and s < n:
+            rects.append((w, s, e, n))
+    return rects
+
+
+def _subtract_rect(pieces, rect):
+    """Subtract a rectangle from a list of rectangles
+
+    Returns the rectangles covering the parts of *pieces* that lie
+    outside *rect*. Intersections with no area (boundary touches) do
+    not remove anything.
+    """
+    w, s, e, n = rect
+    out = []
+    for pw, ps, pe, pn in pieces:
+        iw, is_, ie, in_ = max(pw, w), max(ps, s), min(pe, e), min(pn, n)
+        if iw >= ie or is_ >= in_:
+            out.append((pw, ps, pe, pn))
+            continue
+        remnants = [
+            (pw, ps, iw, pn),
+            (ie, ps, pe, pn),
+            (iw, ps, ie, is_),
+            (iw, in_, ie, pn),
+        ]
+        out.extend(p for p in remnants if p[2] > p[0] and p[3] > p[1])
+    return out
+
+
+def license_catalog(west, south, east, north, licenses, zooms, truncate=False):
+    """Classify the tiles overlapped by a bbox by license coverage
+
+    Tiles are sorted into three tiers: those completely covered by the
+    union of the license rectangles (the only tiles that may be
+    collected), those only partially covered, and those with no area
+    in common with any license. Adjacent licenses whose union exactly
+    covers a tile place it in the "full" tier, while a license that
+    only touches a tile along a shared boundary contributes nothing.
+
+    Licenses crossing the antimeridian (west > east) are evaluated as
+    one rectangle on each side of the longitude seam. The *licenses*
+    sequence itself is not modified.
+
+    Parameters
+    ----------
+    west, south, east, north : float
+        Bounding values of the survey area in decimal degrees. The
+        area may cross the antimeridian (west > east), e.g. a survey
+        stretching from 179 E to 179 W.
+    licenses : sequence of (west, south, east, north) sequences
+        Approved license rectangles in decimal degrees.
+    zooms : int or sequence of int
+        One or more zoom levels.
+    truncate : bool, optional
+        Whether or not to truncate inputs to web mercator limits.
+
+    Returns
+    -------
+    LicenseCatalog
+        A named tuple of tile lists: (full, partial, none).
+
+    Examples
+    --------
+    >>> cat = license_catalog(179.0, -10.0, -179.0, 10.0, [(179.0, -10.0, -179.0, 10.0)], 2)
+    >>> sorted(cat.partial)
+    [Tile(x=0, y=1, z=2), Tile(x=0, y=2, z=2), Tile(x=3, y=1, z=2), Tile(x=3, y=2, z=2)]
+
+    """
+    rects = []
+    for lic in licenses:
+        rects.extend(_split_license(*lic))
+
+    full, partial, none = [], [], []
+
+    for t in tiles(west, south, east, north, zooms, truncate=truncate):
+        tw, ts, te, tn = bounds(t)
+        remaining = [(tw, ts, te, tn)]
+        intersects = False
+        for rect in rects:
+            rw, rs, re, rn = rect
+            if rw < te and re > tw and rs < tn and rn > ts:
+                intersects = True
+                remaining = _subtract_rect(remaining, rect)
+                if not remaining:
+                    break
+        if not remaining:
+            full.append(t)
+        elif intersects:
+            partial.append(t)
+        else:
+            none.append(t)
+
+    return LicenseCatalog(full, partial, none)
 
 
 def parent(*tile, **kwargs):

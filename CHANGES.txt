@@ -1,6 +1,18 @@
 Changes
 =======
 
+Next
+----
+
+- New ``license_catalog`` function classifies the tiles overlapped by a
+  survey bbox (which may cross the antimeridian) into three tiers --
+  fully covered, partially covered, and not intersected -- according to
+  the union of approved license rectangles. Licenses crossing the
+  antimeridian are evaluated as one rectangle on each side of the
+  longitude seam without modifying the input list, adjacent licenses
+  whose union exactly covers a tile count as full coverage, and licenses
+  that only touch a tile along a boundary contribute no area.
+
 1.2.1 (2021-04-21)
 ------------------
 

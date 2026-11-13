@@ -578,3 +578,73 @@ def test_geojson_bounds(obj):
 def test_xy_future_warnings(x, y):
     with pytest.warns(FutureWarning):
         mercantile.Tile(x, y, 0)
+
+
+def test_license_catalog_tiers():
+    """Tiles are sorted into full, partial, and none tiers"""
+    licenses = [
+        # Two adjacent licenses whose union exactly covers Tile(0, 1, 2).
+        (-180.0, 0.0, -135.0, 85.0),
+        (-135.0, 0.0, -90.0, 85.0),
+        # Intersects Tile(3, 2, 2) and only touches Tile(3, 1, 2) along
+        # the lat 0 boundary, which contributes no collection area.
+        (170.0, -80.0, 175.0, 0.0),
+    ]
+    catalog = mercantile.license_catalog(179.0, -10.0, -179.0, 10.0, licenses, 2)
+    assert catalog.full == [mercantile.Tile(0, 1, 2)]
+    assert catalog.partial == [mercantile.Tile(3, 2, 2)]
+    assert catalog.none == [mercantile.Tile(0, 2, 2), mercantile.Tile(3, 1, 2)]
+
+
+def test_license_catalog_adjacent_exact_cover():
+    """Adjacent licenses exactly tiling a tile make it fully collectible"""
+    b = mercantile.bounds(0, 1, 2)
+    mid = (b.west + b.east) / 2.0
+    licenses = [
+        (b.west, b.south, mid, b.north),
+        (mid, b.south, b.east, b.north),
+    ]
+    catalog = mercantile.license_catalog(b.west, b.south, b.east, b.north, licenses, 2)
+    assert catalog.full == [mercantile.Tile(0, 1, 2)]
+    assert catalog.partial == []
+    assert catalog.none == []
+
+
+def test_license_catalog_boundary_touch_is_not_area():
+    """A license sharing only an edge with a tile contributes nothing"""
+    b = mercantile.bounds(3, 1, 2)
+    assert b.west == 90.0
+    licenses = [(0.0, b.south, 90.0, b.north)]
+    catalog = mercantile.license_catalog(b.west, b.south, b.east, b.north, licenses, 2)
+    assert catalog.full == []
+    assert catalog.partial == []
+    assert catalog.none == [mercantile.Tile(3, 1, 2)]
+
+
+def test_license_catalog_antimeridian_license_split():
+    """A license crossing the seam covers tiles on both sides"""
+    licenses = [[179.0, -10.0, -179.0, 10.0]]
+    catalog = mercantile.license_catalog(179.0, -10.0, -179.0, 10.0, licenses, 2)
+    assert catalog.full == []
+    assert sorted(catalog.partial) == [
+        mercantile.Tile(0, 1, 2),
+        mercantile.Tile(0, 2, 2),
+        mercantile.Tile(3, 1, 2),
+        mercantile.Tile(3, 2, 2),
+    ]
+    assert catalog.none == []
+    # The approved license list is not modified.
+    assert licenses == [[179.0, -10.0, -179.0, 10.0]]
+
+
+def test_license_catalog_no_licenses():
+    """Without licenses every tile falls in the none tier"""
+    catalog = mercantile.license_catalog(179.0, -10.0, -179.0, 10.0, [], 2)
+    assert catalog.full == []
+    assert catalog.partial == []
+    assert sorted(catalog.none) == [
+        mercantile.Tile(0, 1, 2),
+        mercantile.Tile(0, 2, 2),
+        mercantile.Tile(3, 1, 2),
+        mercantile.Tile(3, 2, 2),
+    ]
