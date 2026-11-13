@@ -569,6 +569,13 @@ class TextFSM(object):
   state_name_re = re.compile(r'^(\w+)$')
   _DEFAULT_OPTIONS = TextFSMOptions
 
+  # Line boundaries recognised by str.splitlines(). Incremental feeds may
+  # end in the middle of a line (or between CR and LF), so input is
+  # buffered until a complete line is available.
+  _LINE_BREAKS = ('\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\x85',
+                  '\u2028', '\u2029')
+  _LINE_BREAK_CHARS = ''.join(_LINE_BREAKS)
+
   def __init__(self, template, options_class=_DEFAULT_OPTIONS):
     """Initialises and also parses the template file."""
 
@@ -619,6 +626,11 @@ class TextFSM(object):
     # Clear table of results and current record.
     self._result = []
     self._ClearAllRecord()
+
+    # Clear incremental input state.
+    self._line_buffer = ''
+    self._pending_cr = False
+    self._closed = False
 
   @property
   def header(self):
@@ -909,21 +921,156 @@ class TextFSM(object):
       List of Lists.
     """
 
-    lines = []
     if text:
-      lines = text.splitlines()
+      self.ParseTextIncremental(text)
+    if eof:
+      self.CloseIncremental()
+
+    return self._result
+
+  def ParseTextIncremental(self, text):
+    """Feeds a chunk of CLI output through the FSM.
+
+    Chunks may be arbitrary slices of the output; a chunk does not need to
+    end on a line boundary. A trailing partial line (including a CR that
+    may yet pair with a LF, such as a page prompt split across two reads)
+    is buffered and completed by subsequent feeds. Feeding an empty string
+    is a no-op and does NOT signal the end of the input; use
+    CloseIncremental() for that.
+
+    Rows appended to the result may still be rewritten by later 'Fillup'
+    assignments. Use CommitRows() to retrieve rows that are final.
+
+    Args:
+      text: (str), The next chunk of text. May be empty.
+
+    Raises:
+      TextFSMError: An error occurred within the FSM.
+    """
+
+    if not text:
+      return
+
+    # New input means a previously closed collection has resumed.
+    self._closed = False
+
+    if self._pending_cr:
+      # A CR at the end of the previous chunk pairs with a leading LF to
+      # form a single line boundary. A lone CR already terminated its line.
+      self._pending_cr = False
+      if text.startswith('\n'):
+        text = text[1:]
+
+    text = self._line_buffer + text
+    self._line_buffer = ''
+
+    complete_tail = False
+    if text.endswith('\r'):
+      # Hold back the trailing CR; it may be half of a CRLF pair split
+      # across two chunks. Everything before it is line-terminated either
+      # way, so it can be processed now.
+      self._pending_cr = True
+      text = text[:-1]
+      complete_tail = True
+
+    lines = text.splitlines(keepends=True)
+    if complete_tail:
+      if not lines or lines[-1].endswith(tuple(self._LINE_BREAKS)):
+        # The held-back CR terminates the (possibly empty) line that
+        # follows the last line boundary.
+        lines.append('')
+    elif lines and not lines[-1].endswith(tuple(self._LINE_BREAKS)):
+      # Trailing partial line; wait for the remainder in the next chunk.
+      self._line_buffer = lines.pop()
 
     for line in lines:
-      self._CheckLine(line)
+      self._CheckLine(line.rstrip(self._LINE_BREAK_CHARS))
       if self._cur_state_name in ('End', 'EOF'):
+        # FSM is done; any remaining input is discarded.
+        self._line_buffer = ''
+        self._pending_cr = False
         break
 
-    if self._cur_state_name != 'End' and 'EOF' not in self.states and eof:
+  def CloseIncremental(self):
+    """Signals that the collection of input is complete.
+
+    Flushes any buffered partial line as a final line and performs the
+    implicit EOF 'Next.Record' operation (unless suppressed by an 'EOF'
+    state in the template or by an 'End' state transition). This is the
+    only way to end a collection; feeding an empty string to
+    ParseTextIncremental() does not. Once closed, all remaining rows are
+    final and can be retrieved with CommitRows().
+
+    Raises:
+      TextFSMError: An error occurred within the FSM.
+    """
+
+    if self._closed:
+      return
+
+    # A CR held back at the end of input contributed nothing beyond
+    # terminating the line that preceded it.
+    self._pending_cr = False
+
+    if self._line_buffer and self._cur_state_name not in ('End', 'EOF'):
+      line = self._line_buffer
+      self._line_buffer = ''
+      self._CheckLine(line)
+
+    self._closed = True
+
+    if self._cur_state_name != 'End' and 'EOF' not in self.states:
       # Implicit EOF performs Next.Record operation.
       # Suppressed if Null EOF state is instantiated.
       self._AppendRecord()
 
-    return self._result
+  def CommitRows(self):
+    """Returns result rows that are final and removes them from the FSM.
+
+    Rows staged in the result table may still be rewritten by a later
+    'Fillup' assignment (e.g. a chassis id printed at the bottom of a page
+    is copied up onto the port rows above it). Only rows that no future
+    input can alter are returned here, so they are safe to hand downstream
+    (e.g. insert into a database); rows already returned will never change.
+    Rows still subject to 'Fillup' remain staged inside the FSM and are
+    returned by a later call once they become final. After
+    CloseIncremental(), every remaining row is final.
+
+    Returns:
+      List of rows (lists) that are final, in order.
+    """
+
+    count = self._CommittableCount()
+    committed = self._result[:count]
+    self._result = self._result[count:]
+    return committed
+
+  def _CommittableCount(self):
+    """Number of leading result rows that no future input can alter."""
+
+    if self._closed:
+      return len(self._result)
+
+    # 'Fillup' is the only option that rewrites existing result rows. A
+    # fillup assignment copies its value up the table until it reaches a
+    # row that already has that column set, so only rows at or below the
+    # last filled entry of a fillup column can still change.
+    fillup_columns = [
+        column
+        for column, value in enumerate(self.values)
+        if 'Fillup' in value.OptionNames()
+    ]
+    if not fillup_columns:
+      return len(self._result)
+
+    committable = len(self._result)
+    for column in fillup_columns:
+      last_filled = -1
+      for row_index, row in enumerate(self._result):
+        if row[column]:
+          last_filled = row_index
+      committable = min(committable, last_filled + 1)
+    return committable
 
   def ParseTextToDicts(self, text, eof=True):
     """Calls ParseText and turns the result into list of dicts.

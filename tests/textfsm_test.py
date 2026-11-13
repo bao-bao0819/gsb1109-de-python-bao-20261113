@@ -950,6 +950,132 @@ Start
     )
 
 
+class UnitTestIncremental(unittest.TestCase):
+  """Tests incremental (chunked) parsing."""
+
+  # Chassis id is printed at the bottom of each page and copied up onto
+  # the port rows above it via Fillup.
+  TPLT = (
+      'Value Port (\\S+)\n'
+      'Value Fillup Chassis (\\S+)\n'
+      '\n'
+      'Start\n'
+      '  ^Port ${Port} -> Record\n'
+      '  ^Chassis ${Chassis} -> Clear\n'
+  )
+
+  DATA = (
+      'Port Gi1\n'
+      'Port Gi2\n'
+      '--More--\n'
+      'Chassis 1\n'
+      'Port Gi3\n'
+      '--More--\n'
+      'Chassis 2\n'
+  )
+
+  EXPECTED = [['Gi1', '1'], ['Gi2', '1'], ['Gi3', '2']]
+
+  def _ParseIncremental(self, chunks):
+    t = textfsm.TextFSM(io.StringIO(self.TPLT))
+    collected = []
+    for chunk in chunks:
+      t.ParseTextIncremental(chunk)
+      collected.extend(t.CommitRows())
+    t.CloseIncremental()
+    collected.extend(t.CommitRows())
+    return collected
+
+  def testStagedVsCommittable(self):
+    """Rows are committable only once no Fillup can rewrite them."""
+    t = textfsm.TextFSM(io.StringIO(self.TPLT))
+
+    # Chassis not yet seen, so both port rows are still staged.
+    t.ParseTextIncremental('Port Gi1\nPort Gi2\n')
+    self.assertListEqual(t.CommitRows(), [])
+
+    # Chassis id fills up the rows above; they are now final.
+    t.ParseTextIncremental('Chassis 1\n')
+    committed = t.CommitRows()
+    self.assertListEqual(committed, [['Gi1', '1'], ['Gi2', '1']])
+
+    # Next port is staged again until its chassis id arrives.
+    t.ParseTextIncremental('Port Gi3\n')
+    self.assertListEqual(t.CommitRows(), [])
+    t.ParseTextIncremental('Chassis 2\n')
+    self.assertListEqual(t.CommitRows(), [['Gi3', '2']])
+
+    t.CloseIncremental()
+    self.assertListEqual(t.CommitRows(), [])
+
+    # Rows handed downstream earlier were not rewritten by later input.
+    self.assertListEqual(committed, [['Gi1', '1'], ['Gi2', '1']])
+
+  def testCommitRowsWithoutFillup(self):
+    """Without Fillup every recorded row is immediately committable."""
+    tplt = 'Value boo (.*)\n\nStart\n  ^$boo -> Next.Record\n'
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    t.ParseTextIncremental('one\ntwo\n')
+    self.assertListEqual(t.CommitRows(), [['one'], ['two']])
+    t.CloseIncremental()
+    self.assertListEqual(t.CommitRows(), [])
+
+  def testSplitPagePrompt(self):
+    """A page prompt split across two feeds is reassembled."""
+    prompt_at = self.DATA.index('--More--')
+    chunks = [self.DATA[: prompt_at + 2], self.DATA[prompt_at + 2 :]]
+    self.assertEqual(chunks[0][-2:], '--')
+    self.assertEqual(chunks[1][:6], 'More--')
+    self.assertListEqual(self._ParseIncremental(chunks), self.EXPECTED)
+
+    # Splitting inside a data line is equally safe.
+    cut = self.DATA.index('Gi2') + 1
+    chunks = [self.DATA[:cut], self.DATA[cut:]]
+    self.assertListEqual(self._ParseIncremental(chunks), self.EXPECTED)
+
+  def testEmptyFeedIsNotEof(self):
+    """An empty feed does not end the collection; CloseIncremental does."""
+    tplt = 'Value boo (.*)\n\nStart\n  ^$boo -> Next\n'
+    t = textfsm.TextFSM(io.StringIO(tplt))
+
+    t.ParseTextIncremental('Matching text')
+    t.ParseTextIncremental('')
+    # No implicit EOF record yet: the line is still being collected.
+    self.assertListEqual(t.CommitRows(), [])
+    t.ParseTextIncremental('')
+    self.assertListEqual(t.CommitRows(), [])
+
+    t.CloseIncremental()
+    self.assertListEqual(t.CommitRows(), [['Matching text']])
+
+    # Closing twice is harmless.
+    t.CloseIncremental()
+    self.assertListEqual(t.CommitRows(), [])
+
+  def testArbitrarySplitPoints(self):
+    """Chunking anywhere yields the same table as parsing the whole."""
+    whole = textfsm.TextFSM(io.StringIO(self.TPLT)).ParseText(self.DATA)
+    self.assertListEqual(whole, self.EXPECTED)
+    for cut in range(len(self.DATA) + 1):
+      chunks = [self.DATA[:cut], self.DATA[cut:]]
+      self.assertListEqual(self._ParseIncremental(chunks), whole)
+
+  def testArbitrarySplitPointsCrLf(self):
+    """Same as above with CRLF line endings, splitting CR and LF apart."""
+    data = self.DATA.replace('\n', '\r\n')
+    whole = textfsm.TextFSM(io.StringIO(self.TPLT)).ParseText(data)
+    self.assertListEqual(whole, self.EXPECTED)
+    for cut in range(len(data) + 1):
+      chunks = [data[:cut], data[cut:]]
+      self.assertListEqual(self._ParseIncremental(chunks), whole)
+
+  def testParseTextMatchesIncremental(self):
+    """ParseText is equivalent to feeding everything then closing."""
+    t = textfsm.TextFSM(io.StringIO(self.TPLT))
+    self.assertListEqual(t.ParseText(self.DATA), self.EXPECTED)
+    self.assertListEqual(self._ParseIncremental([self.DATA]), self.EXPECTED)
+
+
 class UnitTestUnicode(unittest.TestCase):
   """Tests the FSM engine."""
 
