@@ -1,0 +1,176 @@
+import re
+import unicodedata
+from typing import Any, Dict, Optional
+import warnings
+
+from normality.constants import UNICODE_CATEGORIES, CONTROL_CODES, WS
+from normality.util import Categories, is_text
+
+TRANSLATE_CACHE_MAX = 2**15
+
+COLLAPSE_RE = re.compile(
+    r"[\s\u2028\u2000-\u200a\u2029\u0a00\u1680\u202f\u205f\u3000]+", re.U
+)
+COLLAPSE_REMOVE_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060-\u2064]", re.U)
+BOM_RE = re.compile("^\ufeff", re.U)
+QUOTES_RE = re.compile(r'^["\'](.*)["\']$')
+
+# Unicode space-like codepoints that should be normalised to a plain space.
+_UNSAFE_SPACE_CPS = (
+    *range(0x2000, 0x200B),  # General punctuation spaces (en quad … hair space)
+    0x2028,  # Line separator
+    0x2029,  # Paragraph separator
+    0x0A00,  # (reserved, appears as space in some datasets)
+    0x1680,  # Ogham space mark
+    0x202F,  # Narrow no-break space
+    0x205F,  # Medium mathematical space
+    0x3000,  # Ideographic space
+)
+_UNSAFE_SPACE_SET = frozenset(chr(cp) for cp in _UNSAFE_SPACE_CPS)
+
+# Codepoints that should be deleted entirely from text.
+_UNSAFE_DELETE_CPS = (
+    *range(0x00, 0x09),  # C0 controls: NUL–BS (excludes HT U+0009)
+    *range(0x0B, 0x0D),  # C0 controls: VT, FF (excludes CR U+000D)
+    *range(0x0E, 0x20),  # C0 controls: SO–US
+    0x7F,  # DEL
+    *range(0x80, 0xA0),  # C1 controls
+    *range(0x200B, 0x2010),  # Zero-width space, ZWNJ, ZWJ, LRM, RLM, ALM, LRE, RLE...
+    0x061C,  # Arabic letter mark
+    *range(0x2060, 0x2065),  # Word joiner, invisible operators
+    0x00AD,  # Soft hyphen
+    0xFEFF,  # BOM / zero-width no-break space
+    # Lone UTF-16 surrogates (U+D800–U+DFFF): not valid Unicode characters,
+    # only appear in Python str when decoded with surrogatepass/surrogatescape.
+    *range(0xD800, 0xE000),
+)
+_UNSAFE_COMBINED_CPS = set(_UNSAFE_SPACE_CPS) | set(_UNSAFE_DELETE_CPS)
+_UNSAFE_COMBINED_RE = re.compile(
+    "[" + "".join(re.escape(chr(cp)) for cp in _UNSAFE_COMBINED_CPS) + "]"
+)
+
+
+def decompose_nfkd(text: Any) -> Optional[str]:
+    """Perform unicode compatibility decomposition.
+
+    This will replace some non-standard value representations in unicode and
+    normalise them, while also separating characters and their diacritics into
+    two separate codepoints.
+    """
+    if not is_text(text):
+        return None
+    return unicodedata.normalize("NFKD", text)
+
+
+def compose_nfc(text: Any) -> Optional[str]:
+    """Perform unicode composition."""
+    if not is_text(text):
+        return None
+    return unicodedata.normalize("NFC", text)
+
+
+def compose_nfkc(text: Any) -> Optional[str]:
+    """Perform unicode composition."""
+    if not is_text(text):
+        return None
+    return unicodedata.normalize("NFKC", text)
+
+
+def strip_quotes(text: str) -> Optional[str]:
+    """Remove double or single quotes surrounding a string."""
+    if not is_text(text):
+        warnings.warn(
+            "normality.strip_quotes will stop handling None soon.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return None
+    return QUOTES_RE.sub("\\1", text)
+
+
+class _TranslateTable(dict[int, Optional[int]]):
+    """Lazy str.translate() table for category-based character replacement.
+
+    Caches codepoint → replacement mappings on first encounter, up to
+    TRANSLATE_CACHE_MAX entries. Beyond that limit, lookups fall back to a
+    direct category call without caching.
+    """
+
+    CACHE: Dict[int, "_TranslateTable"] = {}
+
+    def __init__(self, replacements: Categories) -> None:
+        self._replacements = replacements
+
+    def __missing__(self, codepoint: int) -> Optional[int]:
+        cat = unicodedata.category(chr(codepoint))
+        replacement = self._replacements.get(cat)
+        if replacement is None and cat not in self._replacements:
+            val: Optional[int] = codepoint  # not in replacements: keep as-is
+        elif not replacement:
+            val = None  # delete
+        else:
+            val = ord(replacement[0])  # replace with first char (e.g. space)
+        if len(self) < TRANSLATE_CACHE_MAX:
+            self[codepoint] = val
+        return val
+
+
+def category_replace(text: str, replacements: Categories = UNICODE_CATEGORIES) -> str:
+    """Remove characters from a string based on unicode classes.
+
+    This is a method for removing non-text characters (such as punctuation,
+    whitespace, marks and diacritics) from a piece of text by class, rather
+    than specifying them individually.
+    """
+    table_key = id(replacements)
+    if table_key not in _TranslateTable.CACHE:
+        _TranslateTable.CACHE[table_key] = _TranslateTable(replacements)
+    text = unicodedata.normalize("NFKD", text)
+    return text.translate(_TranslateTable.CACHE[table_key])
+
+
+def remove_control_chars(text: str) -> str:
+    """Remove just the control codes from a piece of text."""
+    return category_replace(text, replacements=CONTROL_CODES)
+
+
+def _unsafe_repl(m: re.Match[str]) -> str:
+    return WS if m.group() in _UNSAFE_SPACE_SET else ""
+
+
+def remove_unsafe_chars(text: str) -> str:
+    """Remove unsafe unicode characters from a piece of text.
+
+    Replaces space-like Unicode chars with a plain space, and deletes control
+    characters, invisible formatting characters, and lone UTF-16 surrogates.
+    """
+    return _UNSAFE_COMBINED_RE.sub(_unsafe_repl, text)
+
+
+def remove_byte_order_mark(text: str) -> str:
+    """Remove a BOM from the beginning of the text."""
+    return BOM_RE.sub("", text)
+
+
+def collapse_spaces(text: str) -> Optional[str]:
+    """Remove newlines, tabs and multiple spaces with single spaces."""
+    warnings.warn(
+        "normality.collapse_spaces is deprecated, use normality.squash_spaces instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    # TODO: Remove in 3.1:
+    if text is None:
+        return None
+
+    text = COLLAPSE_RE.sub(WS, text).strip(WS)
+    if len(text) == 0:
+        return None
+    return text
+
+
+def squash_spaces(text: str) -> str:
+    """Remove all whitespace characters from a piece of text."""
+    text = COLLAPSE_REMOVE_RE.sub("", text)
+    return COLLAPSE_RE.sub(WS, text).strip(WS)

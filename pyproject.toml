@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "normality"
+version = "3.1.0"
+authors = [{ name = "Friedrich Lindenberg", email = "friedrich@pudo.org" }]
+license = { file = "LICENSE" }
+description = "Micro-library to normalize text strings"
+readme = "README.md"
+keywords = ["text", "unicode", "normalization", "slugs"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">= 3.10"
+dependencies = [
+    "banal >= 1.0.1",
+    "pyicu >= 2.10.0",
+    "chardet",
+    "charset-normalizer >= 2.0.0",
+]
+# dynamic = ["version"]
+
+[project.urls]
+Documentation = "https://github.com/pudo/normality"
+Repository = "https://github.com/pudo/normality.git"
+Issues = "https://github.com/pudo/normality/issues"
+
+[project.optional-dependencies]
+icu = []
+dev = ["mypy", "pytest", "ruff", "types-chardet", "wheel", "build"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["normality", "LICENSE", "README.md"]
+
+[tool.distutils.bdist_wheel]
+universal = true
+
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::DeprecationWarning"]
