@@ -1,0 +1,6 @@
+Value Port (\S+)
+Value State (\S+)
+
+Start
+  ^Port ${Port} ${State} -> Record
+  ^-- More --$$ -> End

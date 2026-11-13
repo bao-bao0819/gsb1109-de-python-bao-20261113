@@ -22,6 +22,68 @@ licence for the benefit of the wider community.
 
 [**See documentation for more details.**](https://github.com/google/textfsm/wiki/TextFSM)
 
+Offline verification
+--------------------
+`textfsm-audit` cross-checks a captured CLI echo against the index and its
+templates without changing normal parsing behaviour. It is useful when device
+identification is incomplete or when more than one template can read the same
+echo.
+
+```sh
+textfsm-audit examples/cisco_version_example \
+  --index index --template-dir examples \
+  --attribute Vendor=Cisco \
+  --attribute Command='show version'
+```
+
+The report separates:
+
+* `determined columns`: every compared template declares the same logical
+  field, and (when records exist) the parsed values agree.
+* `template-dependent columns`: the field is missing from at least one
+  template or its parsed values disagree. These columns should not be treated
+  as device facts until the correct template is chosen.
+
+An index match is never assumed to be unique. All matching rows are reported;
+the row that the existing first-match behaviour selects is marked as `selected`
+so a truncated model value that prefix-matches several rows is visible.
+
+A zero-record result is only reported as `confirmed-empty` when the echo
+actually hits the template's own explicit `End` or `EOF` transition. Declaring
+an empty `EOF` state in the template is not evidence that it was reached.
+Without that in-band terminator the result is reported as
+`unverified-missing-end-marker` (or `unverified-template-has-no-end-marker`),
+because a truncated or unrecognised echo can also produce zero rows.
+
+If two templates use different names for the same field, supply the field
+equivalence map explicitly:
+
+```sh
+textfsm-audit echo.txt --template-dir examples \
+  --template cisco_version_template:f10_version_template \
+  --field-map Model=Chassis \
+  --json
+```
+
+The same behaviour is available from Python:
+
+```python
+from textfsm import audit
+
+report = audit.audit_echo(
+    echo,
+    index_file='index',
+    template_dir='examples',
+    attributes={'Vendor': 'Cisco', 'Command': 'show version'},
+    field_map={'Model': 'Chassis'},
+)
+print(report.format_text())
+```
+
+The command exits non-zero with `--fail-on-ambiguous-index`,
+`--fail-on-unverified`, or `--fail-on-incomplete` when the corresponding
+condition is found.
+
 Before contributing
 -------------------
 If you are not a Google employee, our lawyers insist that you sign a Contributor

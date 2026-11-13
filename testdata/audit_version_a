@@ -1,0 +1,7 @@
+Value Model (\S+)
+Value Memory (\S+)
+Value Version (\S+)
+
+Start
+  ^Cisco IOS Software.*Version ${Version},
+  ^cisco ${Model} .* with ${Memory} bytes of memory

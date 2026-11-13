@@ -1,0 +1,4 @@
+# Two index families accept the same truncated model cue.
+Template, Vendor, Model, Command
+audit_version_a, Cisco, WS-C4948.*, sh[[ow]] ve[[rsion]]
+audit_version_b, Cisco, WS-C494[68].*, sh[[ow]] ve[[rsion]]

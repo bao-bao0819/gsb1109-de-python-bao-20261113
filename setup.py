@@ -55,7 +55,12 @@ setup(
         'Topic :: Software Development :: Libraries',
     ],
     packages=find_packages(),
-    entry_points={'console_scripts': ['textfsm=textfsm.parser:main']},
+    entry_points={
+        'console_scripts': [
+            'textfsm=textfsm.parser:main',
+            'textfsm-audit=textfsm.audit:main',
+        ]
+    },
     include_package_data=True,
     package_data={'textfsm': ['../testdata/*']},
 )

@@ -135,23 +135,40 @@ class IndexTable(object):
           row[col] = re.compile(row[col])
 
   def GetRowMatch(self, attributes):
-    """Returns the row number that matches the supplied attributes."""
+    """Returns the row number of the first row that matches the attributes."""
+    rows = self.GetRowMatches(attributes)
+    return rows[0] if rows else 0
+
+  def GetRowMatches(self, attributes):
+    """Returns row numbers for every row that matches the supplied attributes.
+
+    Unlike GetRowMatch(), this does not stop at the first matching row. An
+    incomplete set of attributes (for example a truncated device model) can
+    legitimately match more than one index row; callers can use this method to
+    surface that ambiguity instead of silently accepting the first match.
+
+    Args:
+      attributes: Dict, attributes to match against the compiled index.
+
+    Returns:
+      List of matching row numbers, in index order.
+    """
+    matches = []
     for row in self.compiled:
-      try:
-        for key in attributes:
-          # Silently skip attributes not present in the index file.
-          # pylint: disable=E1103
-          if (
-              key in row.header
-              and row[key]
-              and not row[key].match(attributes[key])
-          ):
-            # This line does not match, so break and try next row.
-            raise StopIteration()
-        return row.row
-      except StopIteration:
-        pass
-    return 0
+      matched = True
+      for key in attributes:
+        # Silently skip attributes not present in the index file.
+        # pylint: disable=E1103
+        if (
+            key in row.header
+            and row[key]
+            and not row[key].match(attributes[key])
+        ):
+          matched = False
+          break
+      if matched:
+        matches.append(row.row)
+    return matches
 
 
 class CliTable(texttable.TextTable):

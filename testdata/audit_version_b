@@ -1,0 +1,7 @@
+Value Chassis (\S+)
+Value Memory (\S+)
+Value Version (\S+)
+
+Start
+  ^Cisco IOS Software.*Version ${Version},
+  ^cisco ${Chassis} .* with ${Memory} bytes of memory

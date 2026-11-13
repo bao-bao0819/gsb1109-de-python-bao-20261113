@@ -584,6 +584,15 @@ class TextFSM(object):
     self._cur_state = None
     # Name of the current state.
     self._cur_state_name = None
+    # Explicit end states declared by the template ('End' and/or 'EOF').
+    self.explicit_end_states = ()
+    # Rules in the template that transition to an explicit end state.
+    self.end_marker_rules = ()
+    # Details about the most recent ParseText() call.
+    self.last_parse_terminated = False
+    self.last_parse_termination_state = None
+    self.last_parse_termination_line = None
+    self.last_parse_termination_rule = None
 
     # Read and parse FSM definition.
     # Restore the file pointer once done.
@@ -619,6 +628,11 @@ class TextFSM(object):
     # Clear table of results and current record.
     self._result = []
     self._ClearAllRecord()
+
+    self.last_parse_terminated = False
+    self.last_parse_termination_state = None
+    self.last_parse_termination_line = None
+    self.last_parse_termination_rule = None
 
   @property
   def header(self):
@@ -863,6 +877,18 @@ class TextFSM(object):
     if 'Start' not in self.states:
       raise TextFSMTemplateError("Missing state 'Start'.")
 
+    # Remember which explicit end states the template declared before 'End'
+    # is removed from the state machine.
+    self.explicit_end_states = tuple(
+        state for state in ('End', 'EOF') if state in self.states
+    )
+    self.end_marker_rules = tuple(
+        rule
+        for state in self.states
+        for rule in self.states[state]
+        if rule.new_state in ('End', 'EOF')
+    )
+
     # 'End/EOF' state (if specified) must be empty.
     if self.states.get('End'):
       raise TextFSMTemplateError("Non-Empty 'End' state.")
@@ -913,9 +939,17 @@ class TextFSM(object):
     if text:
       lines = text.splitlines()
 
+    self.last_parse_terminated = False
+    self.last_parse_termination_state = None
+    self.last_parse_termination_line = None
+    self.last_parse_termination_rule = None
+
     for line in lines:
       self._CheckLine(line)
       if self._cur_state_name in ('End', 'EOF'):
+        self.last_parse_terminated = True
+        self.last_parse_termination_state = self._cur_state_name
+        self.last_parse_termination_line = line
         break
 
     if self._cur_state_name != 'End' and 'EOF' not in self.states and eof:
@@ -968,6 +1002,8 @@ class TextFSM(object):
           if rule.new_state:
             if rule.new_state not in ('End', 'EOF'):
               self._cur_state = self.states[rule.new_state]
+            else:
+              self.last_parse_termination_rule = rule
             self._cur_state_name = rule.new_state
           break
 
