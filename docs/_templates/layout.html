@@ -1,0 +1,10 @@
+{#
+  Import the theme's layout.
+#}
+{% extends "!layout.html" %}
+
+
+{%- block extrahead %}
+  {{- super() }}
+  <meta name="generator" content="Toms"/>
+{% endblock %}
