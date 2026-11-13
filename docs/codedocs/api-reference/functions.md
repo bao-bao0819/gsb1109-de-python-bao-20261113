@@ -5,7 +5,7 @@ description: "Reference for the low-level geometry algorithms and comparison hel
 
 `pygeoif.functions` contains the reusable geometry algorithms used throughout the package. These are public helpers, even though most applications consume them indirectly through geometry properties or factory helpers.
 
-Import path: `from pygeoif.functions import centroid, compare_coordinates, compare_geo_interface, convex_hull, dedupe, move_coordinate, move_coordinates, signed_area`
+Import path: `from pygeoif.functions import centroid, compare_coordinates, compare_geo_interface, convex_hull, dedupe, is_simple_ring, move_coordinate, move_coordinates, signed_area, simplify_line`
 
 ## Public Functions
 
@@ -32,6 +32,32 @@ dedupe(coords: LineType) -> LineType
 ```
 
 Removes consecutive duplicate coordinates.
+
+### `simplify_line`
+
+```python
+simplify_line(
+    coords: LineType,
+    tolerance: float,
+    preserve: Iterable[PointType] | None = None,
+) -> LineType
+```
+
+Simplifies a line with the iterative Douglas-Peucker algorithm. Every removed
+point stays within `tolerance` of the resulting line, the endpoints are always
+kept and the coordinates passed as `preserve` (for example survey markers) are
+never removed. A non-positive tolerance returns the input unchanged. Original
+coordinate tuples, including a possible third dimension, are preserved.
+
+### `is_simple_ring`
+
+```python
+is_simple_ring(coords: Sequence[PointType]) -> bool
+```
+
+Returns `True` when a ring does not cross or overlap itself. The ring may be
+passed open or closed. Edges that merely share their consecutive endpoint are
+not considered intersections.
 
 ### `convex_hull`
 
@@ -108,6 +134,7 @@ print(move_coordinates(coords, (10, -5, 100)))
 
 ## Related API
 
+- [Topology](/docs/api-reference/topology)
 - [Factories](/docs/api-reference/factories)
 - [Types And Protocols](/docs/api-reference/types-and-protocols)
 - [LinearRing](/docs/api-reference/linearring)

@@ -19,7 +19,9 @@
 
 import math
 from collections.abc import Iterable
+from collections.abc import Sequence
 from itertools import groupby
+from itertools import pairwise
 from itertools import zip_longest
 from typing import cast
 
@@ -81,7 +83,189 @@ def dedupe(coords: LineType) -> LineType:
     return cast("LineType", tuple(coord for coord, _count in groupby(coords)))
 
 
-def _orientation(p: Point2D, q: Point2D, r: Point2D) -> float:
+def _point_segment_distance(
+    point: PointType,
+    start: PointType,
+    end: PointType,
+) -> float:
+    """
+    Return the Euclidean distance from ``point`` to the segment ``start``-``end``.
+
+    Only the first two coordinate dimensions are taken into account.
+    """
+    px, py = point[0], point[1]
+    ax, ay = start[0], start[1]
+    dx, dy = end[0] - ax, end[1] - ay
+    length_squared = dx * dx + dy * dy
+    if length_squared == 0.0:
+        return math.hypot(px - ax, py - ay)
+    projection = ((px - ax) * dx + (py - ay) * dy) / length_squared
+    projection = min(1.0, max(0.0, projection))
+    closest_x = ax + projection * dx
+    closest_y = ay + projection * dy
+    return math.hypot(px - closest_x, py - closest_y)
+
+
+def _locked_indices(
+    coordinates: Sequence[PointType],
+    preserve: Iterable[PointType],
+) -> set[int]:
+    """Return the indices of endpoints and coordinates that must be kept."""
+    locked = {0, len(coordinates) - 1}
+    for landmark in preserve:
+        for index, coordinate in enumerate(coordinates):
+            if coordinate == landmark:
+                locked.add(index)
+                break
+    return locked
+
+
+def _farthest_point(
+    coordinates: Sequence[PointType],
+    first: int,
+    last: int,
+) -> tuple[float, int]:
+    """Find the interior point with the greatest distance to the end chord."""
+    max_distance = -1.0
+    farthest = -1
+    for index in range(first + 1, last):
+        distance = _point_segment_distance(
+            coordinates[index],
+            coordinates[first],
+            coordinates[last],
+        )
+        if distance > max_distance:
+            max_distance = distance
+            farthest = index
+    return max_distance, farthest
+
+
+def simplify_line(
+    coords: LineType,
+    tolerance: float,
+    preserve: Iterable[PointType] | None = None,
+) -> LineType:
+    """
+    Simplify a LineString using the iterative Douglas-Peucker algorithm.
+
+    Points are removed while every removed point stays within ``tolerance``
+    of the resulting line. The first and last coordinate are always kept and
+    every coordinate listed in ``preserve`` is retained as well.
+
+    A non-positive ``tolerance`` returns the coordinates unchanged.
+    Original coordinate tuples (including any third dimension) are preserved.
+    """
+    coordinates: tuple[PointType, ...] = tuple(coords)
+    if len(coordinates) < 3 or tolerance <= 0.0:  # noqa: PLR2004
+        return cast("LineType", coordinates)
+    keep = bytearray(len(coordinates))
+    locked = _locked_indices(coordinates, preserve or ())
+    for index in locked:
+        keep[index] = 1
+    ordered_locks = sorted(locked)
+    stack = list(pairwise(ordered_locks))
+    while stack:
+        first, last = stack.pop()
+        if last - first < 2:  # noqa: PLR2004
+            continue
+        max_distance, farthest = _farthest_point(coordinates, first, last)
+        if max_distance > tolerance:
+            keep[farthest] = 1
+            stack.append((first, farthest))
+            stack.append((farthest, last))
+    return cast(
+        "LineType",
+        tuple(coordinates[index] for index in range(len(coordinates)) if keep[index]),
+    )
+
+
+def _on_segment(point: PointType, start: PointType, end: PointType) -> bool:
+    """Check if a collinear ``point`` lies on the segment ``start``-``end``."""
+    return min(start[0], end[0]) <= point[0] <= max(start[0], end[0]) and min(
+        start[1],
+        end[1],
+    ) <= point[1] <= max(start[1], end[1])
+
+
+def _segments_intersect(
+    first_start: PointType,
+    first_end: PointType,
+    second_start: PointType,
+    second_end: PointType,
+) -> bool:
+    """
+    Check whether two line segments cross or overlap.
+
+    Collinear overlaps and endpoint touches are reported as intersections.
+    """
+    orientation_1 = _orientation(first_start, first_end, second_start)
+    orientation_2 = _orientation(first_start, first_end, second_end)
+    orientation_3 = _orientation(second_start, second_end, first_start)
+    orientation_4 = _orientation(second_start, second_end, first_end)
+    if orientation_1 == 0.0 and _on_segment(
+        second_start,
+        first_start,
+        first_end,
+    ):
+        return True
+    if orientation_2 == 0.0 and _on_segment(
+        second_end,
+        first_start,
+        first_end,
+    ):
+        return True
+    if orientation_3 == 0.0 and _on_segment(
+        first_start,
+        second_start,
+        second_end,
+    ):
+        return True
+    if orientation_4 == 0.0 and _on_segment(
+        first_end,
+        second_start,
+        second_end,
+    ):
+        return True
+    straddle_first = (
+        orientation_1 > 0.0 > orientation_2 or orientation_1 < 0.0 < orientation_2
+    )
+    straddle_second = (
+        orientation_3 > 0.0 > orientation_4 or orientation_3 < 0.0 < orientation_4
+    )
+    return straddle_first and straddle_second
+
+
+def is_simple_ring(coords: Sequence[PointType]) -> bool:
+    """
+    Return True when a LinearRing does not cross or overlap itself.
+
+    The ring may be passed open or closed (last coordinate equal to the first).
+    Edges that merely share their consecutive endpoint are not considered
+    intersections.
+    """
+    points: tuple[PointType, ...] = tuple(coords)
+    if len(points) > 1 and points[0] == points[-1]:
+        points = points[:-1]
+    point_count = len(points)
+    if point_count < 3:  # noqa: PLR2004
+        return True
+    for index in range(point_count):
+        start: PointType = points[index]
+        end: PointType = points[(index + 1) % point_count]
+        for other in range(index + 1, point_count):
+            are_adjacent = other == index + 1 or (
+                index == 0 and other == point_count - 1
+            )
+            if are_adjacent:
+                continue
+            other_start: PointType = points[other]
+            other_end: PointType = points[(other + 1) % point_count]
+            if _segments_intersect(start, end, other_start, other_end):
+                return False
+    return True
+
+
+def _orientation(p: PointType, q: PointType, r: PointType) -> float:
     """
     Calculate orientation of three points (p, q, r).
 
@@ -264,7 +448,9 @@ __all__ = [
     "compare_geo_interface",
     "convex_hull",
     "dedupe",
+    "is_simple_ring",
     "move_coordinate",
     "move_coordinates",
     "signed_area",
+    "simplify_line",
 ]

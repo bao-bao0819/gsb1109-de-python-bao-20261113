@@ -4,8 +4,11 @@ Changelog
 1.7.0 (unreleased)
 --------------------
 
-
-
+- add ``simplify_line`` Douglas-Peucker line simplification with optional
+  preserved coordinates and ``is_simple_ring`` self-intersection check.
+- add ``pygeoif.topology.simplify_polygons`` to simplify adjacent polygons while
+  keeping shared boundaries identical, handling reversed and differently
+  sampled registrations, preserving landmarks and preventing self-intersections.
 1.6.0 (2025/10/01)
 ------------------
 

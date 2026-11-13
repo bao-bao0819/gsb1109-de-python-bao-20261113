@@ -42,6 +42,14 @@ pygeoif.functions module
    :undoc-members:
    :show-inheritance:
 
+pygeoif.topology module
+-----------------------
+
+.. automodule:: pygeoif.topology
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 pygeoif.exceptions module
 -------------------------
 
