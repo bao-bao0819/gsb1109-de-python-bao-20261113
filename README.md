@@ -129,6 +129,14 @@ Features
 * Pickle-friendly
 * Automatic AVL balancing
 
+* Integer pulse allocation
+    * `allocate_pulses(total, shifts, ...)`  (split one published integer pulse count into additive shift and section sub-ledgers)
+    * `PulseLedger(total, shifts, ...)`      (the same operation as a constructor)
+    * known pulse instants are assigned exactly before duration apportionment
+    * downtime is excluded from effective duration
+    * all ranges are half-open, so a cut point belongs to the segment beginning there
+    * `result.check()` verifies that all sub-ledgers add back up to the master total
+
 Examples
 --------
 
@@ -341,6 +349,76 @@ Examples
     Interval(10, 15, 'oldlimit: 5, islower: False')
 
     ```
+
+* Integer pulse allocation
+
+    A master ledger may publish a single integer pulse count for an
+    overall window, while downstream systems need additive sub-ledgers
+    split by overlapping shifts and then by work section.
+    `allocate_pulses()` performs that split:
+
+    ``` python
+    >>> from intervaltree import allocate_pulses
+    >>> result = allocate_pulses(
+    ...     10,
+    ...     shifts={'A': (0, 5), 'B': (5, 10)},
+    ...     sections={
+    ...         'A': {'A1': (0, 2), 'A2': (2, 5)},
+    ...         'B': {'B1': (5, 7), 'B2': (7, 10)},
+    ...     },
+    ...     pulses=[5, 2],
+    ... )
+    >>> dict(result.by_shift)
+    {'A': 5, 'B': 5}
+    >>> dict(result.by_section['A'])
+    {'A1': 2, 'A2': 3}
+    >>> result.check()
+    True
+
+    ```
+
+    Every range is half-open, `[begin, end)`. The pulse at `5` therefore
+    belongs to shift `B` and section `B1`, not to the segments ending at
+    `5`. Known instants are assigned exactly first; the rest are
+    apportioned by effective duration. Downtime ranges carry no weight:
+
+    ``` python
+    >>> result = allocate_pulses(
+    ...     11,
+    ...     shifts={'A': (0, 10), 'B': (10, 20)},
+    ...     downtime=[(3, 9)],
+    ... )
+    >>> dict(result.by_shift)
+    {'A': 3, 'B': 8}
+
+    ```
+
+    Rounding uses largest remainders. Each row records its exact quota,
+    integer floor, fractional part, and number of remainder pulses
+    awarded, so it is possible to audit exactly where the rounding
+    remainder went:
+
+    ``` python
+    >>> result = allocate_pulses(
+    ...     5, shifts=[('A', 0, 3), ('B', 3, 5), ('C', 5, 10)]
+    ... )
+    >>> dict(result.by_shift)
+    {'A': 2, 'B': 1, 'C': 2}
+    >>> [(e.key, e.rank, e.extra) for e in result.shift_entries]
+    [('A', 1, 1), ('B', 3, 0), ('C', 2, 0)]
+
+    ```
+
+    `result.remainders` lists the awarded rows, and `summary()` returns a
+    serializable audit snapshot. Known instants that fall outside the
+    hierarchy, or into a gap, raise `UnallocatedPulseError`; genuinely
+    ambiguous overlaps raise `AmbiguousPulseError`.
+
+    Sections may be nested by shift, given as flat records with a
+    `shift` field, or supplied as `Interval` objects; a shift with no
+    explicit sections exposes itself as one implicit section so the
+    by-section view stays additive. `result.check()` re-verifies both
+    levels of the hierarchy.
 
 Future improvements
 -------------------
