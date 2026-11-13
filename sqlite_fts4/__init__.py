@@ -40,15 +40,74 @@ def _error(m):
 
 
 @wrap_sqlite_function_in_error_logger
-def annotate_matchinfo(buf, format_string):
-    return json.dumps(_annotate_matchinfo(buf, format_string), indent=2)
+def annotate_matchinfo(buf, format_string, columns=None, phrases=None):
+    # columns and phrases are Python-only arguments: the SQL function is
+    # registered with two arguments, so callers inside SQLite get index-based
+    # annotation without names.
+    return json.dumps(
+        _annotate_matchinfo(buf, format_string, columns=columns, phrases=phrases),
+        indent=2,
+    )
 
 
-def _annotate_matchinfo(buf, format_string):
+class _NameResolver:
+    "Maps matchinfo column/phrase indexes onto a caller supplied directory"
+
+    def __init__(self, directory, kind):
+        if isinstance(directory, (str, bytes)) or not hasattr(directory, "__len__"):
+            raise TypeError(
+                "{} directory must be a sequence of names, not {}".format(
+                    kind, type(directory).__name__
+                )
+            )
+        self.directory = list(directory)
+        self.kind = kind
+        # (index, reason) -> set of matchinfo sections where it was referenced
+        self.unrecognized = {}
+
+    def resolve(self, index, section):
+        if 0 <= index < len(self.directory):
+            return self.directory[index]
+        reason = (
+            "{} index {} is out of range for directory of length {}".format(
+                self.kind, index, len(self.directory)
+            )
+        )
+        entry = self.unrecognized.setdefault(
+            index, {"index": index, "reason": reason, "sections": set()}
+        )
+        entry["sections"].add(section)
+        return None
+
+    def report(self):
+        return [
+            {
+                "index": entry["index"],
+                "reason": entry["reason"],
+                "sections": sorted(entry["sections"]),
+            }
+            for _, entry in sorted(self.unrecognized.items())
+        ]
+
+
+def _annotate_matchinfo(buf, format_string, columns=None, phrases=None):
     # See https://www.sqlite.org/fts3.html#matchinfo for detailed specification
     matchinfo = list(decode_matchinfo(buf))
     if not matchinfo:
         return {}
+    column_resolver = _NameResolver(columns, "column") if columns is not None else None
+    phrase_resolver = _NameResolver(phrases, "phrase") if phrases is not None else None
+
+    def resolve_column(column_index, section):
+        if column_resolver is None:
+            return None
+        return column_resolver.resolve(column_index, section)
+
+    def resolve_phrase(phrase_index, section):
+        if phrase_resolver is None:
+            return None
+        return phrase_resolver.resolve(phrase_index, section)
+
     matchinfo_index = 0
     p_num_phrases = None
     c_num_columns = None
@@ -93,7 +152,9 @@ def _annotate_matchinfo(buf, format_string):
                     info.append(
                         {
                             "phrase_index": phrase_index,
+                            "phrase": resolve_phrase(phrase_index, "x"),
                             "column_index": column_index,
+                            "column": resolve_column(column_index, "x"),
                             "hits_this_column_this_row": hits_this_column_this_row,
                             "hits_this_column_all_rows": hits_this_column_all_rows,
                             "docs_with_hits": docs_with_hits,
@@ -114,7 +175,9 @@ def _annotate_matchinfo(buf, format_string):
                     info.append(
                         {
                             "phrase_index": phrase_index,
+                            "phrase": resolve_phrase(phrase_index, "y"),
                             "column_index": column_index,
+                            "column": resolve_column(column_index, "y"),
                             "hits_for_phrase_in_col": hits_for_phrase_in_col,
                             "idx": idx,
                         }
@@ -126,6 +189,7 @@ def _annotate_matchinfo(buf, format_string):
             # We get back one integer for each 32 columns for each phrase
             num_32_column_chunks = (c_num_columns + 31) // 32
             decoded = {}
+            phrase_details = []
             for phrase_index in range(p_num_phrases):
                 current_phrase_chunks = []
                 for _ in range(num_32_column_chunks):
@@ -138,12 +202,52 @@ def _annotate_matchinfo(buf, format_string):
                         for unsigned_integer in current_phrase_chunks
                     ]
                 )
+                hit_columns = []
+                unrecognized_columns = []
+                for chunk_index, chunk in enumerate(current_phrase_chunks):
+                    for bit in range(32):
+                        column_index = chunk_index * 32 + bit
+                        if column_index >= c_num_columns:
+                            break
+                        if not (chunk & (1 << bit)):
+                            continue
+                        column_name = resolve_column(column_index, "b")
+                        hit_columns.append(
+                            {
+                                "column_index": column_index,
+                                "column": column_name,
+                            }
+                        )
+                        if (
+                            column_resolver is not None
+                            and column_index in column_resolver.unrecognized
+                        ):
+                            unrecognized_columns.append(
+                                {
+                                    "column_index": column_index,
+                                    "reason": column_resolver.unrecognized[
+                                        column_index
+                                    ]["reason"],
+                                }
+                            )
+                phrase_details.append(
+                    {
+                        "phrase_index": phrase_index,
+                        "phrase": resolve_phrase(phrase_index, "b"),
+                        "column_indexes": [
+                            entry["column_index"] for entry in hit_columns
+                        ],
+                        "columns": hit_columns,
+                        "unrecognized_columns": unrecognized_columns,
+                    }
+                )
             results["b"] = {
                 "title": "Bitfield showing which phrases occur in which columns",
                 "value": values,
                 # Each integer is a 32bit unsigned integer, least significant
                 # bit is column 0, then column 1, then so on
                 "decoded": decoded,
+                "phrases": phrase_details,
             }
         elif ch == "n":
             value, idx = _next()
@@ -159,7 +263,12 @@ def _annotate_matchinfo(buf, format_string):
             for i in range(c_num_columns):
                 value, idx = _next()
                 values.append(
-                    {"column_index": i, "average_num_tokens": value, "idx": idx}
+                    {
+                        "column_index": i,
+                        "column": resolve_column(i, "a"),
+                        "average_num_tokens": value,
+                        "idx": idx,
+                    }
                 )
             results["a"] = {
                 "title": "Average number of tokens in each column across the whole table",
@@ -171,7 +280,14 @@ def _annotate_matchinfo(buf, format_string):
             values = []
             for i in range(c_num_columns):
                 value, idx = _next()
-                values.append({"column_index": i, "num_tokens": value, "idx": idx})
+                values.append(
+                    {
+                        "column_index": i,
+                        "column": resolve_column(i, "l"),
+                        "num_tokens": value,
+                        "idx": idx,
+                    }
+                )
             results["l"] = {
                 "title": "Number of tokens in each column of the current row of the FTS4 table",
                 "value": values,
@@ -185,6 +301,7 @@ def _annotate_matchinfo(buf, format_string):
                 values.append(
                     {
                         "column_index": i,
+                        "column": resolve_column(i, "s"),
                         "length_phrase_subsequence_match": value,
                         "idx": idx,
                     }
@@ -193,6 +310,13 @@ def _annotate_matchinfo(buf, format_string):
                 "title": "Length of longest subsequence of phrase matching each column",
                 "value": values,
             }
+    unrecognized = {}
+    if column_resolver is not None and column_resolver.unrecognized:
+        unrecognized["columns"] = column_resolver.report()
+    if phrase_resolver is not None and phrase_resolver.unrecognized:
+        unrecognized["phrases"] = phrase_resolver.report()
+    if unrecognized:
+        results["unrecognized"] = unrecognized
     return results
 
 

@@ -146,3 +146,91 @@ The returned JSON will include a key for each letter in the format string. For e
     }
 }
 ```
+
+### Annotating against the index columns and query phrases
+
+Calling the function from Python lets you pass the column directory used when
+the FTS index was created and the query phrases in query order, so each
+numeric index is annotated with its business name. These are Python-only
+arguments - the SQL function registered by `register_functions()` keeps its
+original two-argument signature and returns `null` for every name field.
+
+```python
+import json
+from sqlite_fts4 import annotate_matchinfo
+
+columns = ["title", "body"]          # CREATE VIRTUAL TABLE ... USING fts4(title, body)
+phrases = ['"dog dog"', "dog"]       # phrases in the order they appear in the MATCH query
+annotated = json.loads(
+    annotate_matchinfo(buf, "pcb", columns=columns, phrases=phrases)
+)
+```
+
+Every entry in the `x`, `y`, `a`, `l` and `s` sections gains `"column"` and,
+where relevant, `"phrase"` name fields. The `b` bitfield is decoded per
+phrase (this works for tables with more than 32 columns, since each group of
+32 columns is a separate 32-bit integer):
+
+```json
+{
+    "b": {
+        "title": "Bitfield showing which phrases occur in which columns",
+        "phrases": [
+            {
+                "phrase_index": 0,
+                "phrase": "\"dog dog\"",
+                "column_indexes": [1],
+                "columns": [{"column_index": 1, "column": "body"}],
+                "unrecognized_columns": []
+            },
+            {
+                "phrase_index": 1,
+                "phrase": "dog",
+                "column_indexes": [0, 1],
+                "columns": [
+                    {"column_index": 0, "column": "title"},
+                    {"column_index": 1, "column": "body"}
+                ],
+                "unrecognized_columns": []
+            }
+        ]
+    }
+}
+```
+
+A phrase that matched no columns is still listed, with an empty
+`column_indexes` list, so hit and unhit phrases stay distinguishable. The
+same word can occur in multiple phrases - each phrase is tracked separately
+in query order.
+
+Indexes that cannot be mapped onto the supplied directories (for example
+column 32 of a 33-column table when only one name was provided) are reported
+once in a top-level `unrecognized` block, with the matchinfo sections where
+each index was referenced:
+
+```json
+{
+    "unrecognized": {
+        "columns": [
+            {
+                "index": 32,
+                "reason": "column index 32 is out of range for directory of length 1",
+                "sections": ["b", "x"]
+            }
+        ],
+        "phrases": [
+            {
+                "index": 1,
+                "reason": "phrase index 1 is out of range for directory of length 1",
+                "sections": ["b"]
+            }
+        ]
+    }
+}
+```
+
+The corresponding name fields inside the sections are `null`, and the
+unmapped columns are also repeated in the per-phrase `unrecognized_columns`
+list. Directories must be indexable sequences; passing a string or number
+raises `TypeError`.
+
