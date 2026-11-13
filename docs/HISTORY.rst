@@ -4,7 +4,10 @@ Changelog
 1.7.0 (unreleased)
 --------------------
 
-
+- add ``pygeoif.connectivity`` to export projected two dimensional road lines
+  together with node connectivity based on the original elevations, including
+  interpolated elevations at mid-segment crossings and direction independent
+  results.
 
 1.6.0 (2025/10/01)
 ------------------

@@ -18,6 +18,12 @@
 """PyGeoIf provides a GeoJSON-like protocol for geo-spatial (GIS) vector data."""
 
 from pygeoif.about import __version__  # noqa: F401
+from pygeoif.connectivity import ConnectionStatus
+from pygeoif.connectivity import ConnectivityExport
+from pygeoif.connectivity import classify_connection
+from pygeoif.connectivity import export_connectivity
+from pygeoif.connectivity import line_intersections
+from pygeoif.connectivity import node_connectivity
 from pygeoif.factories import force_2d
 from pygeoif.factories import force_3d
 from pygeoif.factories import from_wkt
@@ -36,6 +42,8 @@ from pygeoif.geometry import Point
 from pygeoif.geometry import Polygon
 
 __all__ = [
+    "ConnectionStatus",
+    "ConnectivityExport",
     "Feature",
     "FeatureCollection",
     "GeometryCollection",
@@ -46,10 +54,14 @@ __all__ = [
     "MultiPolygon",
     "Point",
     "Polygon",
+    "classify_connection",
+    "export_connectivity",
     "force_2d",
     "force_3d",
     "from_wkt",
+    "line_intersections",
     "mapping",
+    "node_connectivity",
     "orient",
     "shape",
 ]
