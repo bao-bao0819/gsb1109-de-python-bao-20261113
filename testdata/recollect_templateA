@@ -1,0 +1,5 @@
+Value Col1 (\S+)
+Value Col2 (\S+)
+
+Start
+  ^${Col1} ${Col2} -> Record

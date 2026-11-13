@@ -1,0 +1,5 @@
+# New-version index used by recollect tests.
+Template, Hostname, Vendor, Command
+recollect_templateA, .*, VendorA, sh[[ow]] ve[[rsion]]
+recollect_templateB, .*, VendorA, sh[[ow]] in[[terfaces]]
+recollect_bogus, .*, VendorA, sh[[ow]] bo[[gs]]
