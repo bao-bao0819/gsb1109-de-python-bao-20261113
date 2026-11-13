@@ -1,0 +1,243 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "id": "宗地001",
+   "properties": {
+    "id": "宗地001"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       0,
+       0
+      ],
+      [
+       10,
+       0
+      ],
+      [
+       10,
+       10
+      ],
+      [
+       0,
+       10
+      ],
+      [
+       0,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地002",
+   "properties": {
+    "id": "宗地002"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       20,
+       0
+      ],
+      [
+       30,
+       0
+      ],
+      [
+       30,
+       10
+      ],
+      [
+       20,
+       10
+      ],
+      [
+       20,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地003",
+   "properties": {
+    "id": "宗地003"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       30,
+       0
+      ],
+      [
+       40,
+       0
+      ],
+      [
+       40,
+       10
+      ],
+      [
+       30,
+       10
+      ],
+      [
+       30,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地004",
+   "properties": {
+    "id": "宗地004"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       50,
+       0
+      ],
+      [
+       60,
+       0
+      ],
+      [
+       60,
+       10
+      ],
+      [
+       50,
+       10
+      ],
+      [
+       50,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地005",
+   "properties": {
+    "id": "宗地005"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       90,
+       0
+      ],
+      [
+       100,
+       0
+      ],
+      [
+       100,
+       10
+      ],
+      [
+       90,
+       10
+      ],
+      [
+       90,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地006",
+   "properties": {
+    "id": "宗地006"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       95,
+       0
+      ],
+      [
+       105,
+       0
+      ],
+      [
+       105,
+       10
+      ],
+      [
+       95,
+       10
+      ],
+      [
+       95,
+       0
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "宗地007",
+   "properties": {
+    "id": "宗地007"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       110,
+       0
+      ],
+      [
+       120,
+       0
+      ],
+      [
+       120,
+       10
+      ],
+      [
+       110,
+       10
+      ],
+      [
+       110,
+       0
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}
