@@ -156,6 +156,36 @@ END;
 ```
 <!-- [[[end]]] -->
 
+## Tracing where a column value came from
+
+To explain why a column has a particular value at a particular row version,
+use `column_value_chain()`. It returns every history event supporting that
+value, from the earliest retained event up to the queried version:
+
+    from sqlite_history import column_value_chain
+
+    chain = column_value_chain(db, "people", rowid=1, column="name", version=3)
+    for event in chain.events:
+        print(event.version, event.value, event.changed)
+
+Each `ChainEvent` carries the resolved `value` for the column at that
+version, plus `changed` (the event explicitly wrote the column), `deleted`
+(the row was deleted, `_mask = -1`), `mask` and `updated`. Events that did
+not touch the column keep their value from the previous event and have
+`changed = False`, so a value carried forward by later updates is
+distinguishable from one that was explicitly set.
+
+Because events are resolved in version order, changing a value from `X` to
+`Y` and back to `X` traces the final `X` to the event that wrote it back
+(the later event), never to the original `X`. `chain.origin` returns that
+establishing event directly.
+
+If the database only retains part of its history, the walk stops at the
+first missing version instead of guessing across the gap: `complete` is
+`False` and `events` starts at the earliest version still verifiable. A
+value of `None` written explicitly is handled correctly, since the `_mask`
+bit (not the stored value) decides whether an event wrote the column.
+
 ## Development
 
 To contribute to this library, first checkout the code. Then create a new virtual environment:

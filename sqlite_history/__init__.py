@@ -1,3 +1,4 @@
+from .chain import ChainEvent, ColumnValueChain, column_value_chain
 from .sql import backfill_sql, history_table_sql, triggers_sql, table_columns_and_types
 
 
