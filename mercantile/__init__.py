@@ -37,6 +37,7 @@ __all__ = [
     "Tile",
     "bounding_tile",
     "bounds",
+    "candidate_tiles",
     "children",
     "feature",
     "lnglat",
@@ -433,6 +434,181 @@ def tile(lng, lat, zoom, truncate=False):
         ytile = int(math.floor((y + EPSILON) * Z2))
 
     return Tile(xtile, ytile, zoom)
+
+
+def _value_interval(value, precision, rounding):
+    """Interval of true values behind a coordinate recorded at finite precision
+
+    Parameters
+    ----------
+    value : float
+        The recorded (rounded) value.
+    precision : int or None
+        Number of decimal places kept by the source. None means the value
+        is exact.
+    rounding : str
+        Rounding mode declared by the source: "nearest", "floor", "ceil",
+        or "trunc".
+
+    Returns
+    -------
+    lo, hi, include_lo, include_hi
+
+    """
+    if precision is None:
+        return value, value, True, True
+
+    if int(precision) != precision:
+        raise ValueError("precision must be an integer number of decimal places")
+
+    unit = 10.0 ** -int(precision)
+
+    if rounding in ("nearest", "round"):
+        half = 0.5 * unit
+        # Tie-breaking of the source is unknown, so both ends are included.
+        return value - half, value + half, True, True
+    elif rounding == "floor":
+        return value, value + unit, True, False
+    elif rounding in ("ceil", "ceiling"):
+        return value - unit, value, False, True
+    elif rounding in ("trunc", "truncate"):
+        if value >= 0:
+            return value, value + unit, True, False
+        else:
+            return value - unit, value, False, True
+    else:
+        raise ValueError("unknown rounding mode: {!r}".format(rounding))
+
+
+def _index_range(frac_lo, frac_hi, z2):
+    """Tile indexes overlapped by a fractional tile coordinate interval
+
+    Indexes are computed exactly as in tile(): points within EPSILON of
+    the east or south side of a tile are counted in the next tile over,
+    so the recorded value's own tile is always among the candidates.
+
+    """
+    lo = int(math.floor((frac_lo + EPSILON) * z2))
+    hi = int(math.floor((frac_hi + EPSILON) * z2))
+    lo = min(max(lo, 0), z2 - 1)
+    hi = min(max(hi, 0), z2 - 1)
+    if hi < lo:
+        return []
+    return list(range(lo, hi + 1))
+
+
+def _y_fraction(lat):
+    """Mercator y fraction of a latitude, growing southward"""
+    if lat >= 90.0:
+        return 0.0
+    elif lat <= -90.0:
+        return 1.0
+    sinlat = math.sin(math.radians(lat))
+    return 0.5 - 0.25 * math.log((1.0 + sinlat) / (1.0 - sinlat)) / math.pi
+
+
+def candidate_tiles(lng, lat, zoom, precision=None, rounding="nearest"):
+    """Get all tiles that may contain a coordinate recorded at finite precision
+
+    Historical observations are often recorded with only a few decimal
+    places, so the recorded value stands for an interval of possible true
+    positions. When that interval touches a tile boundary, a single target
+    tile cannot be determined from the record. This function resolves the
+    interval - according to the rounding mode and precision declared by
+    the source - to every tile that may contain the true position. An
+    importer should only assign the record to a partition when exactly one
+    candidate is returned.
+
+    Longitudes of 180 and -180 are treated as the same seam: a record on
+    or wrapping across the antimeridian yields candidates on both sides of
+    it. Horizontal tile boundaries belong to the tile south of the line
+    (the equator, for example, belongs to the southern tile) and vertical
+    boundaries to the tile east of the line, matching tile(); as in
+    tile(), points within EPSILON of a boundary are counted in the next
+    tile over, so the recorded value's own tile is always a candidate.
+
+    Declaring one more decimal place of precision for the same recorded
+    value can only shrink the returned set, never move it to tiles that
+    the coarser record did not support.
+
+    Parameters
+    ----------
+    lng, lat : float
+        The recorded longitude and latitude in decimal degrees.
+    zoom : int
+        The web mercator zoom level.
+    precision : int, optional
+        Number of decimal places kept by the source. If None (the
+        default), the coordinate is treated as exact.
+    rounding : str, optional
+        Rounding mode declared by the source: "nearest" (the default),
+        "floor", "ceil", or "trunc" (toward zero).
+
+    Returns
+    -------
+    list of Tile
+        The candidate tiles, sorted by x, y, z. Empty if the latitude
+        interval lies entirely outside [-90, 90].
+
+    Examples
+    --------
+    A record of (0.0, 0.0) with one decimal place sits on the intersection
+    of the prime meridian and the equator, so all four adjacent tiles are
+    candidates:
+
+    >>> sorted(candidate_tiles(0.0, 0.0, 1, precision=1))
+    [Tile(x=0, y=0, z=1), Tile(x=0, y=1, z=1), Tile(x=1, y=0, z=1), Tile(x=1, y=1, z=1)]
+
+    The exact point (0, 0) belongs to the tile east and south of the
+    crossing:
+
+    >>> candidate_tiles(0.0, 0.0, 1)
+    [Tile(x=1, y=1, z=1)]
+
+    """
+    minmax(zoom)
+    z2 = 2 ** zoom
+
+    lng_lo, lng_hi, inc_lng_lo, inc_lng_hi = _value_interval(
+        lng, precision, rounding
+    )
+    lat_s, lat_n = _value_interval(lat, precision, rounding)[:2]
+
+    # Longitude: unwrap the interval onto [-180, 180], splitting at the
+    # antimeridian. 180 and -180 are the same seam.
+    xs = set()
+    if lng_hi - lng_lo >= 360.0:
+        xs.update(range(z2))
+    else:
+        k0 = int(math.floor((lng_lo + 180.0) / 360.0))
+        k1 = int(math.floor((lng_hi + 180.0) / 360.0))
+        for k in range(k0, k1 + 1):
+            seg_lo = max(lng_lo, -180.0 + 360.0 * k) - 360.0 * k
+            seg_hi = min(lng_hi, 180.0 + 360.0 * k) - 360.0 * k
+            frac_lo = seg_lo / 360.0 + 0.5
+            frac_hi = seg_hi / 360.0 + 0.5
+            xs.update(_index_range(frac_lo, frac_hi, z2))
+
+        # If the interval contains the seam itself, both edge tiles are
+        # candidates, since 180 and -180 are the same line.
+        ks0 = int(math.ceil((lng_lo - 180.0) / 360.0))
+        ks1 = int(math.floor((lng_hi - 180.0) / 360.0))
+        for k in range(ks0, ks1 + 1):
+            seam = 180.0 + 360.0 * k
+            if (seam > lng_lo or (seam == lng_lo and inc_lng_lo)) and (
+                seam < lng_hi or (seam == lng_hi and inc_lng_hi)
+            ):
+                xs.update((0, z2 - 1))
+                break
+
+    # Latitude: clamp to the valid range; y grows southward.
+    lat_s = max(lat_s, -90.0)
+    lat_n = min(lat_n, 90.0)
+    if lat_s > lat_n:
+        return []
+    ys = _index_range(_y_fraction(lat_n), _y_fraction(lat_s), z2)
+
+    return sorted(Tile(x, y, zoom) for x in xs for y in ys)
 
 
 def quadkey(*tile):

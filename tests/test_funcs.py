@@ -1,7 +1,7 @@
 import warnings
 
 from hypothesis import example, given
-from hypothesis.strategies import composite, integers
+from hypothesis.strategies import composite, floats, integers
 import pytest
 
 import mercantile
@@ -578,3 +578,90 @@ def test_geojson_bounds(obj):
 def test_xy_future_warnings(x, y):
     with pytest.warns(FutureWarning):
         mercantile.Tile(x, y, 0)
+
+
+def test_candidate_tiles_exact():
+    """An exact coordinate yields exactly its tile"""
+    assert mercantile.candidate_tiles(20.6852, 40.1222, 9) == [
+        mercantile.tile(20.6852, 40.1222, 9)
+    ]
+
+
+def test_candidate_tiles_rounded_on_boundary():
+    """A coordinate rounded to 0.0 may lie on either side of lng 0 and the equator"""
+    tiles = mercantile.candidate_tiles(0.0, 0.0, 1, precision=1)
+    expected = [
+        mercantile.Tile(0, 0, 1),
+        mercantile.Tile(0, 1, 1),
+        mercantile.Tile(1, 0, 1),
+        mercantile.Tile(1, 1, 1),
+    ]
+    assert sorted(tiles) == sorted(expected)
+
+
+def test_candidate_tiles_exact_equator():
+    """The exact point (0, 0) belongs to the tile east and south of the crossing"""
+    assert mercantile.candidate_tiles(0.0, 0.0, 1) == [mercantile.Tile(1, 1, 1)]
+
+
+def test_candidate_tiles_antimeridian_same_seam():
+    """180 and -180 are the same seam and give the same candidates"""
+    east = mercantile.candidate_tiles(180.0, 10.0, 2)
+    west = mercantile.candidate_tiles(-180.0, 10.0, 2)
+    assert east == west
+    assert {t.x for t in east} == {0, 3}
+
+
+def test_candidate_tiles_antimeridian_wrap():
+    """An interval wrapping across the antimeridian yields both edge columns"""
+    tiles = mercantile.candidate_tiles(180.0, 10.0, 2, precision=1)
+    assert {t.x for t in tiles} == {0, 3}
+
+
+def test_candidate_tiles_rounding_modes():
+    """The declared rounding mode sets the interval of possible true values"""
+    # floor: true lng in [0.0, 0.1), east of the boundary only
+    tiles = mercantile.candidate_tiles(0.0, 10.0, 1, precision=1, rounding="floor")
+    assert {t.x for t in tiles} == {1}
+    # ceil: true lng in (-0.1, 0.0], both sides are possible
+    tiles = mercantile.candidate_tiles(0.0, 10.0, 1, precision=1, rounding="ceil")
+    assert {t.x for t in tiles} == {0, 1}
+    # trunc toward zero: same as floor for positive values
+    tiles = mercantile.candidate_tiles(0.0, 10.0, 1, precision=1, rounding="trunc")
+    assert {t.x for t in tiles} == {1}
+
+
+def test_candidate_tiles_bad_rounding():
+    with pytest.raises(ValueError):
+        mercantile.candidate_tiles(0.0, 0.0, 1, precision=1, rounding="bankers")
+
+
+def test_candidate_tiles_invalid_latitude():
+    """A latitude interval entirely beyond the poles has no candidates"""
+    assert mercantile.candidate_tiles(0.0, 95.0, 1, precision=1) == []
+
+
+@given(
+    lng=floats(min_value=-180, max_value=180, allow_nan=False),
+    lat=floats(min_value=-85, max_value=85, allow_nan=False),
+    z=integers(min_value=0, max_value=14),
+)
+def test_candidate_tiles_contain_exact(lng, lat, z):
+    """The tile of the recorded value is always among the candidates"""
+    for rounding in ("nearest", "floor", "ceil", "trunc"):
+        assert mercantile.tile(lng, lat, z) in mercantile.candidate_tiles(
+            lng, lat, z, precision=1, rounding=rounding
+        )
+
+
+@given(
+    lng=floats(min_value=-180, max_value=180, allow_nan=False),
+    lat=floats(min_value=-85, max_value=85, allow_nan=False),
+    z=integers(min_value=0, max_value=14),
+)
+def test_candidate_tiles_precision_monotone(lng, lat, z):
+    """One more decimal place of precision can only shrink the candidate set"""
+    for rounding in ("nearest", "floor", "ceil", "trunc"):
+        coarse = mercantile.candidate_tiles(lng, lat, z, precision=1, rounding=rounding)
+        fine = mercantile.candidate_tiles(lng, lat, z, precision=2, rounding=rounding)
+        assert set(fine) <= set(coarse)

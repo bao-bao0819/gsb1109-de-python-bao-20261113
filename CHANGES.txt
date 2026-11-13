@@ -1,6 +1,19 @@
 Changes
 =======
 
+1.3.0 (unreleased)
+------------------
+
+New features:
+
+- Add ``candidate_tiles`` to resolve a coordinate recorded at finite
+  precision to every tile that may contain the true position, honoring the
+  source-declared rounding mode ("nearest", "floor", "ceil", "trunc") and
+  number of decimal places. Longitudes of 180 and -180 are treated as the
+  same seam, and an interval touching a tile boundary yields the tiles on
+  both sides of it, so importers can assign a record to a partition only
+  when a single candidate remains.
+
 1.2.1 (2021-04-21)
 ------------------
 
