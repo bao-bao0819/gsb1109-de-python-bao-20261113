@@ -1,6 +1,13 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- New ``tile_diff`` function computes a minimal sequence of include/exclude
+  quadkey prefix operations that transforms one tile set into another at a
+  given zoom level.
+
 1.2.1 (2021-04-21)
 ------------------
 

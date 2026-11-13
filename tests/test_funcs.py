@@ -1,7 +1,8 @@
 import warnings
+from collections import deque
 
-from hypothesis import example, given
-from hypothesis.strategies import composite, integers
+from hypothesis import example, given, settings
+from hypothesis.strategies import composite, integers, lists, sampled_from
 import pytest
 
 import mercantile
@@ -578,3 +579,145 @@ def test_geojson_bounds(obj):
 def test_xy_future_warnings(x, y):
     with pytest.warns(FutureWarning):
         mercantile.Tile(x, y, 0)
+
+
+def _leaf_set(qks, zoom):
+    """Expand quadkey prefixes to the set of leaf quadkeys at *zoom*"""
+    leaves = set()
+    stack = list(qks)
+    while stack:
+        qk = stack.pop()
+        if len(qk) == zoom:
+            leaves.add(qk)
+        else:
+            stack.extend(qk + digit for digit in "0123")
+    return leaves
+
+
+def _apply_ops(old, ops, zoom):
+    """Apply a tile_diff change list to *old* and return the leaf set"""
+    leaves = _leaf_set(old, zoom)
+    for action, qk in ops:
+        subtree = _leaf_set([qk], zoom)
+        if action == "include":
+            leaves |= subtree
+        elif action == "exclude":
+            leaves -= subtree
+        else:
+            raise AssertionError("unexpected action %r" % (action,))
+    return leaves
+
+
+def _minimal_ops(old, new, zoom):
+    """Brute-force minimal number of include/exclude ops (BFS over leaf sets)"""
+    start = frozenset(_leaf_set(old, zoom))
+    goal = frozenset(_leaf_set(new, zoom))
+    if start == goal:
+        return 0
+    prefixes = [""]
+    for qk in list(prefixes):
+        if len(qk) < zoom:
+            prefixes.extend(qk + digit for digit in "0123")
+    ops = [
+        (action, qk, frozenset(_leaf_set([qk], zoom)))
+        for qk in prefixes
+        for action in ("include", "exclude")
+    ]
+    seen = {start}
+    queue = deque([(start, 0)])
+    while queue:
+        state, depth = queue.popleft()
+        for action, qk, subtree in ops:
+            if action == "include":
+                nxt = state | subtree
+            else:
+                nxt = state - subtree
+            if nxt == goal:
+                return depth + 1
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, depth + 1))
+    raise AssertionError("goal state unreachable")
+
+
+def test_tile_diff_noop():
+    """Identical sets require no operations"""
+    assert mercantile.tile_diff([], [], 2) == []
+    assert mercantile.tile_diff(["0", "13"], ["13", "0"], 2) == []
+
+
+def test_tile_diff_include_and_exclude():
+    assert mercantile.tile_diff([], ["0"], 1) == [("include", "0")]
+    assert mercantile.tile_diff(["0"], [], 2) == [("exclude", "0")]
+    assert mercantile.tile_diff([], [""], 0) == [("include", "")]
+
+
+def test_tile_diff_canvas_and_hole():
+    """Including a block and carving a hole beats listing children"""
+    ops = mercantile.tile_diff([], ["0", "1", "2", "30", "31", "32"], 2)
+    assert ops == [("include", ""), ("exclude", "33")]
+
+
+def test_tile_diff_override_order():
+    """Later operations override earlier ones"""
+    ops = mercantile.tile_diff(["0"], ["01"], 2)
+    assert ops == [("exclude", "0"), ("include", "01")]
+    assert _apply_ops(["0"], ops, 2) == _leaf_set(["01"], 2)
+
+
+def test_tile_diff_redundant_prefixes():
+    """Redundant prefixes in the inputs do not affect the result"""
+    assert mercantile.tile_diff(["0", "00", "01"], ["0"], 2) == []
+    assert mercantile.tile_diff(["00", "01", "02", "03"], ["0"], 2) == []
+    assert mercantile.tile_diff(["0"], ["0", "00"], 2) == []
+
+
+def test_tile_diff_accepts_tiles():
+    """Tiles may be used instead of quadkey strings"""
+    ops = mercantile.tile_diff([mercantile.Tile(0, 0, 1)], [mercantile.Tile(1, 1, 1)], 1)
+    assert _apply_ops(["0"], ops, 1) == _leaf_set(["3"], 1)
+    assert len(ops) == _minimal_ops(["0"], ["3"], 1)
+
+
+def test_tile_diff_invalid_zoom():
+    with pytest.raises(mercantile.InvalidZoomError):
+        mercantile.tile_diff([], [], -1)
+    with pytest.raises(mercantile.InvalidZoomError):
+        mercantile.tile_diff(["000"], [], 2)
+
+
+def test_tile_diff_invalid_quadkey():
+    with pytest.raises(mercantile.QuadKeyError):
+        mercantile.tile_diff(["04"], [], 2)
+
+
+def _quadkeys(max_zoom):
+    qks = [""]
+    for qk in list(qks):
+        if len(qk) < max_zoom:
+            qks.extend(qk + digit for digit in "0123")
+    return qks
+
+
+@settings(max_examples=30, derandomize=True)
+@given(
+    old=lists(sampled_from(_quadkeys(2)), max_size=6),
+    new=lists(sampled_from(_quadkeys(2)), max_size=6),
+)
+def test_tile_diff_correct_and_minimal(old, new):
+    """Applying the change list yields *new* and uses as few ops as possible"""
+    ops = mercantile.tile_diff(old, new, 2)
+    assert all(len(qk) <= 2 for action, qk in ops)
+    assert _apply_ops(old, ops, 2) == _leaf_set(new, 2)
+    assert len(ops) == _minimal_ops(old, new, 2)
+
+
+@settings(max_examples=30, derandomize=True)
+@given(
+    old=lists(sampled_from(_quadkeys(3)), max_size=8),
+    new=lists(sampled_from(_quadkeys(3)), max_size=8),
+)
+def test_tile_diff_correct_zoom3(old, new):
+    """Every leaf at zoom 3 matches *new* after applying the change list"""
+    ops = mercantile.tile_diff(old, new, 3)
+    assert _apply_ops(old, ops, 3) == _leaf_set(new, 3)

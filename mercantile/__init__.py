@@ -46,6 +46,7 @@ __all__ = [
     "quadkey_to_tile",
     "simplify",
     "tile",
+    "tile_diff",
     "tiles",
     "ul",
     "xy_bounds",
@@ -721,6 +722,139 @@ def simplify(tiles):
     while is_merging:
         root_set, is_merging = merge(root_set)
     return root_set
+
+
+def _quadkey_set(items, zoom):
+    """Normalize a sequence of quadkeys/tiles to a simplified set of quadkeys
+
+    Redundant entries (duplicates, children of listed prefixes, and
+    groups of siblings covering their parent) are removed so that they
+    cannot influence the result of tile_diff.
+    """
+    tiles = []
+    for item in items:
+        if isinstance(item, str):
+            t = quadkey_to_tile(item)
+        else:
+            t = _parse_tile_arg(item)
+        if t[2] > zoom:
+            raise InvalidZoomError(
+                "tile and quadkey zooms must not exceed the given zoom"
+            )
+        tiles.append(t)
+    return set(quadkey(t) for t in simplify(tiles))
+
+
+def tile_diff(old, new, zoom):
+    """Compute a minimal sequence of include/exclude prefix operations
+
+    Both *old* and *new* are collections of quadkeys (or tiles) in which
+    an entry stands for its entire subtree down to level *zoom*. The
+    returned operations, applied in order to *old*, make the visibility
+    of every leaf at level *zoom* match *new*. Each operation is an
+    (action, quadkey) pair where action is "include" or "exclude";
+    later operations override earlier ones where prefixes overlap.
+
+    The number of operations is minimal: including a whole subtree and
+    then excluding a small part of it is used whenever that is cheaper
+    than enumerating the remaining children.
+
+    Parameters
+    ----------
+    old, new : sequence of str or Tile
+        Quadkeys (or tiles) describing the old and new tile sets.
+        Entries deeper than *zoom* are rejected. Redundant entries,
+        e.g. a quadkey whose parent prefix is also listed, do not
+        affect the result.
+    zoom : int
+        The finest level. Leaves are the tiles at this zoom level and
+        no emitted prefix is deeper than this.
+
+    Returns
+    -------
+    list of (str, str) tuples
+        (action, quadkey) operations, in the order they must be applied.
+
+    Examples
+    --------
+    >>> tile_diff([], ["0"], 1)
+    [('include', '0')]
+    >>> tile_diff([], ["0", "1", "2", "30", "31", "32"], 2)
+    [('include', ''), ('exclude', '33')]
+    >>> tile_diff(["0"], ["01"], 2)
+    [('exclude', '0'), ('include', '01')]
+
+    """
+    try:
+        if int(zoom) != zoom or zoom < 0:
+            raise InvalidZoomError("zoom must be a positive integer")
+    except ValueError:
+        raise InvalidZoomError("zoom must be a positive integer")
+
+    old_set = _quadkey_set(old, zoom)
+    new_set = _quadkey_set(new, zoom)
+
+    def proper_prefixes(qks):
+        prefixes = set()
+        for qk in qks:
+            for i in range(len(qk)):
+                prefixes.add(qk[:i])
+        return prefixes
+
+    old_ancestors = proper_prefixes(old_set)
+    new_ancestors = proper_prefixes(new_set)
+
+    def covered(qk, qks):
+        return any(qk[:i] in qks for i in range(len(qk) + 1))
+
+    @lru_cache(maxsize=None)
+    def children_best(qk, inherited):
+        cost, ops = 0, []
+        for digit in "0123":
+            child_cost, child_ops = best(qk + digit, inherited)
+            cost += child_cost
+            ops.extend(child_ops)
+        return cost, tuple(ops)
+
+    @lru_cache(maxsize=None)
+    def best(qk, inherited):
+        # inherited is None (state from *old* applies), True (an
+        # "include" of an ancestor applies), or False ("exclude").
+        old_covered = covered(qk, old_set)
+        new_covered = covered(qk, new_set)
+        old_uniform = old_covered or qk not in old_ancestors
+        new_uniform = new_covered or qk not in new_ancestors
+
+        if new_uniform:
+            target = new_covered
+            if inherited is not None:
+                current = inherited
+            elif old_uniform:
+                current = old_covered
+            else:
+                current = None
+            if current is not None and current == target:
+                return (0, ())
+            # One operation at this prefix settles the whole subtree.
+            emit = (1, (("include" if target else "exclude", qk),))
+            if len(qk) < zoom:
+                plain = children_best(qk, inherited)
+                if plain[0] <= emit[0]:
+                    return plain
+            return emit
+
+        # The target within this subtree is mixed. Either fix the
+        # children directly, or first include/exclude the whole
+        # subtree and then patch the children that disagree.
+        result = children_best(qk, inherited)
+        for action, canvas in (("include", True), ("exclude", False)):
+            cost, ops = children_best(qk, canvas)
+            if 1 + cost < result[0]:
+                result = (1 + cost, ((action, qk),) + ops)
+        return result
+
+    cost, ops = best("", None)
+    return list(ops)
 
 
 def rshift(val, n):
