@@ -1,7 +1,12 @@
 import sqlite3
-from sqlite_fts4 import register_functions, decode_matchinfo
+from sqlite_fts4 import (
+    register_functions,
+    decode_matchinfo,
+    migrate_matchinfo_batch,
+)
 import pytest
 import json
+import struct
 import sys
 
 
@@ -233,3 +238,158 @@ def test_annotate_matchinfo_y(conn):
         "title": "Usable phrase matches for each phrase/column combination",
     }
     assert expected == json.loads(r)["y"]
+
+
+def _pack(values, byte_order):
+    return struct.pack(
+        ("<" if byte_order == "little" else ">") + "I" * len(values), *values
+    )
+
+
+# matchinfo(search, 'pcx') for the "dog" query against the fixture table
+DOG_PCX = [1, 2, 1, 1, 1, 2, 4, 2]
+DOG_PCX_CHECKSUMS = {
+    "column_total_hits": [1, 4],
+    "column_docs_with_hits": [1, 2],
+    "total_hits": 5,
+}
+
+
+@pytest.mark.parametrize("byte_order", ["little", "big"])
+def test_migrate_matchinfo_batch_detects_byte_order(byte_order):
+    (result,) = migrate_matchinfo_batch(
+        [
+            {
+                "id": "dog-query",
+                "buf": _pack(DOG_PCX, byte_order),
+                "num_phrases": 1,
+                "num_columns": 2,
+                "checksums": DOG_PCX_CHECKSUMS,
+            }
+        ]
+    )
+    assert result["status"] == "ok"
+    assert result["byte_order"] == byte_order
+    assert result["values"] == DOG_PCX
+    assert result["id"] == "dog-query"
+    assert result["verified_checksums"] == sorted(DOG_PCX_CHECKSUMS)
+
+
+def test_migrate_matchinfo_batch_never_assumes_native_order():
+    # A big-endian export must decode as big-endian even on a little-endian
+    # machine and vice versa
+    foreign_order = "big" if sys.byteorder == "little" else "little"
+    (result,) = migrate_matchinfo_batch(
+        [
+            {
+                "buf": _pack(DOG_PCX, foreign_order),
+                "num_phrases": 1,
+                "num_columns": 2,
+            }
+        ]
+    )
+    assert result["status"] == "ok"
+    assert result["byte_order"] == foreign_order
+    assert result["values"] == DOG_PCX
+
+
+def test_migrate_matchinfo_batch_shape_errors():
+    results = migrate_matchinfo_batch(
+        [
+            # Not a multiple of 4 bytes
+            {"buf": b"\x01\x00\x00", "num_phrases": 1, "num_columns": 2},
+            # Wrong integer count for 'pcx' with 1 phrase and 2 columns
+            {
+                "buf": _pack([1, 2, 1], "little"),
+                "num_phrases": 1,
+                "num_columns": 2,
+            },
+        ]
+    )
+    assert [r["status"] for r in results] == ["invalid", "invalid"]
+    assert "multiple of 4" in results[0]["error"]
+    assert "requires 8" in results[1]["error"]
+
+
+def test_migrate_matchinfo_batch_hit_relationship_errors():
+    # hits_this_column_this_row (5) exceeds hits_this_column_all_rows (2)
+    # and docs_with_hits (6) exceeds hits_this_column_all_rows too
+    (result,) = migrate_matchinfo_batch(
+        [
+            {
+                "buf": _pack([1, 1, 5, 2, 6], "little"),
+                "num_phrases": 1,
+                "num_columns": 1,
+            }
+        ]
+    )
+    assert result["status"] == "invalid"
+    assert result["error"] == "no byte order interpretation passes validation"
+    little_problems = result["problems"]["little"]
+    assert any("hits this row 5 exceed hits all rows 2" in p for p in little_problems)
+    assert any("docs with hits 6 exceed hits all rows 2" in p for p in little_problems)
+
+
+def test_migrate_matchinfo_batch_checksum_contradiction():
+    (result,) = migrate_matchinfo_batch(
+        [
+            {
+                "buf": _pack(DOG_PCX, "little"),
+                "num_phrases": 1,
+                "num_columns": 2,
+                "checksums": {"total_hits": 999},
+            }
+        ]
+    )
+    assert result["status"] == "invalid"
+    assert result["checksum_mismatches"] == [
+        {"name": "total_hits", "expected": 999, "actual": 5}
+    ]
+
+
+def test_migrate_matchinfo_batch_all_zero_accepted_either_order():
+    # All-zero segments decode identically under both byte orders
+    (result,) = migrate_matchinfo_batch(
+        [
+            {
+                "buf": _pack([0, 0, 0], "little"),
+                "num_phrases": 0,
+                "num_columns": 0,
+                "format": "pcn",
+                "checksums": {"row_count": 0},
+            }
+        ]
+    )
+    assert result["status"] == "ok"
+    assert result["byte_order"] == "either"
+    assert result["values"] == [0, 0, 0]
+
+
+def test_migrate_matchinfo_batch_ambiguous_lists_distinguishing_checksums():
+    # p and c are 0 (byte-order palindromes) so both interpretations are
+    # structurally valid, but 'n' decodes differently: 5 vs 83886080
+    record = {
+        "buf": _pack([0, 0, 5], "little"),
+        "num_phrases": 0,
+        "num_columns": 0,
+        "format": "pcn",
+    }
+    (result,) = migrate_matchinfo_batch([record])
+    assert result["status"] == "ambiguous"
+    assert result["candidates"] == {"little": [0, 0, 5], "big": [0, 0, 83886080]}
+    assert result["differing_indices"] == [2]
+    assert result["distinguishing_checksums"] == [
+        {"name": "row_count", "little": 5, "big": 83886080}
+    ]
+    # Supplying the distinguishing checksum resolves the ambiguity
+    (resolved,) = migrate_matchinfo_batch(
+        [dict(record, checksums={"row_count": 5})]
+    )
+    assert resolved["status"] == "ok"
+    assert resolved["byte_order"] == "little"
+    assert resolved["values"] == [0, 0, 5]
+    (resolved_big,) = migrate_matchinfo_batch(
+        [dict(record, checksums={"row_count": 83886080})]
+    )
+    assert resolved_big["status"] == "ok"
+    assert resolved_big["byte_order"] == "big"

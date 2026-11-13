@@ -85,6 +85,40 @@ Example output:
 
     hello dog, [1, 1, 1, 1, 1]
 
+`decode_matchinfo()` decodes using the native byte order of the current machine by default. Pass `byte_order="little"` or `byte_order="big"` to decode buffers exported from a machine with a different byte order.
+
+## migrate_matchinfo_batch()
+
+Old exports of `matchinfo()` binary statistics may not record which byte order the exporting machine used. `migrate_matchinfo_batch()` migrates a batch of such archived buffers without assuming the native byte order:
+
+```python
+from sqlite_fts4 import migrate_matchinfo_batch
+
+results = migrate_matchinfo_batch([
+    {
+        "id": "dog-query",
+        "buf": archived_binary,
+        "num_phrases": 1,      # 'p' from the original query
+        "num_columns": 2,      # 'c' from the original table
+        "format": "pcx",       # optional, defaults to "pcx"
+        "checksums": {         # optional, independently archived check values
+            "column_total_hits": [1, 4],
+            "total_hits": 5,
+        },
+    },
+])
+```
+
+Each record is validated in two ways: shape (buffer length against the format string, phrase and column counts against the archived metadata) and per-column hit relationships in the `x` section (row hits cannot exceed total hits, documents with hits cannot exceed hits or the row count, and so on).
+
+Each result has a `status` of:
+
+- `ok` - exactly one byte order is valid (or both decode identically, as with all-zero segments, reported as `byte_order: "either"`). Any supplied checksums are verified before accepting.
+- `invalid` - the shape or hit relationship checks failed for both byte orders, or the decoded values contradict the archived checksums.
+- `ambiguous` - both byte orders are structurally valid but decode to different values. The result lists `distinguishing_checksums` - the checksum items (such as `row_count` or `column_total_hits`, with the positions at which they differ) whose archived values are sufficient to tell the two interpretations apart. The native byte order is never used to break the tie.
+
+Supported checksum keys are `column_total_hits`, `column_docs_with_hits` and `total_hits` (for formats containing `x`) and `row_count` (for formats containing `n`).
+
 ## annotate_matchinfo()
 
 This function decodes the matchinfo document into a verbose JSON structure that describes exactly what each of the returned integers actually means.
