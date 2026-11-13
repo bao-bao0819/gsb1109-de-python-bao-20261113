@@ -32,6 +32,34 @@ Classes
    :members:
    :undoc-members:
 
+Business-day reminders
+----------------------
+
+.. automodule:: schedule.reminders
+
+.. autoclass:: schedule.reminders.BusinessCalendar
+   :members:
+
+.. autoclass:: schedule.reminders.BusinessException
+   :members:
+
+.. autoclass:: schedule.reminders.Receipt
+   :members:
+
+.. autoclass:: schedule.reminders.ReminderEngine
+   :members:
+
+.. autoclass:: schedule.reminders.Reminder
+   :members:
+
+.. autoclass:: schedule.reminders.ReminderItem
+   :members:
+
+.. autoclass:: schedule.reminders.PollResult
+   :members:
+
+.. autofunction:: schedule.reminders.install
+
 
 Exceptions
 ----------
