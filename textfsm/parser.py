@@ -245,8 +245,23 @@ class TextFSMValue(object):
   def AssignVar(self, value):
     """Assign a value to this Value."""
     self.value = value
+    self._NoteAssignment()
     # Call OnAssignVar on options.
     _ = [option.OnAssignVar() for option in self.options]
+
+  def _NoteAssignment(self):
+    """Records that the containing FSM has an uncommitted assignment.
+
+    A value carried by Filldown is row context for the next row, not row
+    content in its own right. Templates made up solely of Filldown values have
+    no other row content to rely on, so they keep the legacy behaviour where
+    any assignment starts a row.
+    """
+    if self.fsm is None:
+      return
+    self.fsm._pending = True
+    if 'Filldown' not in self.OptionNames() or self.fsm._all_filldown:
+      self.fsm._row_content = True
 
   def ClearVar(self):
     """Clear this Value."""
@@ -584,6 +599,13 @@ class TextFSM(object):
     self._cur_state = None
     # Name of the current state.
     self._cur_state_name = None
+    # Tracks whether the current record has data that was not carried down by
+    # a Filldown value.
+    self._pending = False
+    self._row_content = False
+    # True once the template's sealing state has been reached, or once an
+    # implicit EOF has accepted the end of a stream that has no sealing rule.
+    self._complete = False
 
     # Read and parse FSM definition.
     # Restore the file pointer once done.
@@ -591,6 +613,19 @@ class TextFSM(object):
       self._Parse(template)
     finally:
       template.seek(0)
+
+    # A rule that transitions to End or EOF is a trailer adopted by the
+    # device's output format. Its absence leaves the batch unsealed, even if
+    # the input ends cleanly. A bare 'EOF' state only suppresses implicit EOF
+    # and is not itself a trailer rule.
+    self._has_trailer = any(
+        rule.new_state in ('End', 'EOF')
+        for rules in self.states.values()
+        for rule in rules
+    )
+    self._all_filldown = bool(self.values) and all(
+        'Filldown' in value.OptionNames() for value in self.values
+    )
 
     # Initialise starting data.
     self.Reset()
@@ -619,11 +654,37 @@ class TextFSM(object):
     # Clear table of results and current record.
     self._result = []
     self._ClearAllRecord()
+    self._complete = False
 
   @property
   def header(self):
     """Returns header."""
     return self._GetHeader()
+
+  @property
+  def complete(self):
+    """Whether the last ParseText() call reached the end of a complete input.
+
+    A complete input is either one that reached an explicit 'End' or 'EOF'
+    state, or one that ended normally in a template without an 'EOF' state
+    (where implicit EOF applies). Input parsed with eof=False, and input that
+    ends before a template's sealing trailer, are incomplete.
+    """
+    return self._complete
+
+  @property
+  def pending(self):
+    """Values assigned since the last committed record.
+
+    Returns an empty list after a record is committed, cleared, or the FSM is
+    reset. Otherwise it returns the values of the record currently being
+    assembled, with absent values represented as empty strings. A non-empty
+    tail means the input stopped before the template committed that record.
+    """
+    if not self._pending:
+      return []
+
+    return ['' if value.value is None else value.value for value in self.values]
 
   def _GetHeader(self):
     """Returns header."""
@@ -641,20 +702,35 @@ class TextFSM(object):
       if value.name == name:
         return value
 
-  def _AppendRecord(self):
-    """Adds current record to result if well formed."""
+  def _AppendRecord(self, implicit=False):
+    """Adds current record to result if well formed.
+
+    Args:
+      implicit: (bool), True when this is the synthetic record attempted at
+        end of input rather than a template 'Record' operation. An implicit
+        record must contain at least one value that was not merely carried
+        down by Filldown, otherwise an interrupted stream can fabricate a
+        duplicate final row from the residue of the previous record.
+
+    Returns:
+      True if a record was committed, False otherwise.
+    """
 
     # If no Values then don't output.
     if not self.values:
-      return
+      return False
+
+    if implicit and (not self._pending or not self._row_content):
+      return False
 
     cur_record = []
     for value in self.values:
       try:
         value.OnSaveRecord()
       except SkipRecord:
-        self._ClearRecord()
-        return
+        if not implicit:
+          self._ClearRecord()
+        return False
       except SkipValue:
         continue
 
@@ -663,7 +739,7 @@ class TextFSM(object):
 
     # If no Values in template or whole record is empty then don't output.
     if len(cur_record) == (cur_record.count(None) + cur_record.count([])):
-      return
+      return False
 
     # Replace any 'None' entries with null string ''.
     while None in cur_record:
@@ -671,6 +747,7 @@ class TextFSM(object):
 
     self._result.append(cur_record)
     self._ClearRecord()
+    return True
 
   def _Parse(self, template):
     """Parses template file for FSM structure.
@@ -913,15 +990,32 @@ class TextFSM(object):
     if text:
       lines = text.splitlines()
 
+    self._complete = False
     for line in lines:
       self._CheckLine(line)
       if self._cur_state_name in ('End', 'EOF'):
         break
 
-    if self._cur_state_name != 'End' and 'EOF' not in self.states and eof:
+    if self._cur_state_name == 'End':
+      # An explicit trailer rule sealed the source. Any remaining assignment
+      # is still an uncommitted tail, so the batch is not fully parsed.
+      self._complete = not self._pending
+    elif self._cur_state_name == 'EOF':
+      # A rule transitioning to 'EOF' is itself the trailer. Unless a bare
+      # 'EOF' state suppresses it, behave as if implicit End was reached.
+      if eof and 'EOF' not in self.states:
+        self._AppendRecord(implicit=True)
+      self._complete = not self._pending
+    elif eof and not self._has_trailer:
       # Implicit EOF performs Next.Record operation.
       # Suppressed if Null EOF state is instantiated.
-      self._AppendRecord()
+      # This is only a complete input when the caller says it is at EOF and
+      # the template does not require a sealing trailer.
+      if 'EOF' not in self.states:
+        self._AppendRecord(implicit=True)
+      # A tail that could not be committed remains unterminated, so the batch
+      # is not complete even though the caller has no more input.
+      self._complete = not self._pending
 
     return self._result
 
@@ -1060,10 +1154,14 @@ class TextFSM(object):
   def _ClearRecord(self):
     """Remove non 'Filldown' record entries."""
     _ = [value.ClearVar() for value in self.values]
+    self._pending = False
+    self._row_content = False
 
   def _ClearAllRecord(self):
     """Remove all record entries."""
     _ = [value.ClearAllVar() for value in self.values]
+    self._pending = False
+    self._row_content = False
 
   def GetValuesByAttrib(self, attribute):
     """Returns the list of values that have a particular attribute."""
