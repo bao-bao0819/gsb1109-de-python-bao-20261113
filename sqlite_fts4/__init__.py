@@ -270,3 +270,29 @@ def rank_bm25(raw_match_info):
             score += idf * rhs
 
     return -score
+
+
+from .federation import (  # noqa: E402
+    FtsLibrary,
+    FederatedResult,
+    FederatedRanking,
+    MergedLibrary,
+    merge_libraries,
+    rank_federated,
+)
+
+__all__ = [
+    "register_functions",
+    "wrap_sqlite_function_in_error_logger",
+    "decode_matchinfo_str",
+    "decode_matchinfo",
+    "annotate_matchinfo",
+    "rank_score",
+    "rank_bm25",
+    "FtsLibrary",
+    "FederatedResult",
+    "FederatedRanking",
+    "MergedLibrary",
+    "merge_libraries",
+    "rank_federated",
+]

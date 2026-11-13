@@ -91,6 +91,71 @@ This function decodes the matchinfo document into a verbose JSON structure that 
 
 Full documentation for the different format string options can be found here: https://www.sqlite.org/fts3.html#matchinfo
 
+## Federated ranking across separate FTS4 libraries
+
+A per-library `rank_bm25()` first place is not comparable across libraries:
+each FTS4 table computes document frequency, average field length and the
+total document count from its own rows only. `sqlite_fts4.federation`
+recomputes Okapi BM25 against the *merged* corpus statistics instead:
+
+- the total document count is the sum of the per-library row counts,
+- each field's total token length is summed across libraries,
+- each term's document frequency is summed per field across libraries.
+
+Wrap each local table in an `FtsLibrary` carrying a `column_map` from local
+column names to the shared canonical column names. The canonical column order
+in every result is the order of those mapping values.
+
+```python
+import sqlite3
+from sqlite_fts4 import FtsLibrary, rank_federated
+
+north = sqlite3.connect("north.db")
+south = sqlite3.connect("south.db")  # uses different local column names
+
+libraries = [
+    FtsLibrary(north, "docs", {"title": "name", "body": "content"}, name="north"),
+    FtsLibrary(south, "docs", {"headline": "name", "text": "content"}, name="south"),
+]
+
+ranking = rank_federated(libraries, "dog park")
+print(ranking.columns)            # ('name', 'content')
+for result in ranking:
+    print(result.rank, result.score, result.library, result.docid, result.values)
+```
+
+Ties share a competition rank (two first places are followed by rank 3); the
+stable tie-break is library order then original `rowid`.
+
+### Early stopping
+
+Pass `limit` to keep only the top results. With `early_stop=True` (the
+default) the remaining libraries are skipped only once an upper bound on the
+best score any unseen document could reach proves it cannot make the current
+top `limit`. The bound uses each term's total hit count in the unseen
+libraries as the maximum possible single-document term frequency, so a later
+library holding the overall champion is never skipped. Use
+`ranking.stopped_early` and `ranking.libraries_searched` to inspect what
+happened, or pass `early_stop=False` to force every library to be searched.
+
+### Synthetic merged library
+
+For small libraries you can instead copy every document into one synthetic
+FTS4 database and query it directly. It registers a ranking function over the
+same merged statistics and shares the exact scoring and ranking code, so the
+ranks and tie handling are identical to `rank_federated()`.
+
+```python
+from sqlite_fts4 import merge_libraries
+
+merged = merge_libraries(libraries)
+ranking = merged.search("dog park", limit=5)
+```
+
+Both paths accept custom `k1` and `b` parameters (defaults `1.2` and `0.75`,
+matching `rank_bm25()`).
+
+
 You need to call this function with the same format string as was passed to `matchinfo()` - for example:
 
 ```sql
