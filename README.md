@@ -13,6 +13,57 @@ Read [Exploring search relevance algorithms with SQLite](https://simonwillison.n
 
 You can try out these SQL functions [using this interactive demo](https://datasette-sqlite-fts4.datasette.io/24ways-fts4?sql=select%0D%0A++++json_object%28%0D%0A++++++++"label"%2C+articles.title%2C+"href"%2C+articles.url%0D%0A++++%29+as+article%2C%0D%0A++++articles.author%2C%0D%0A++++rank_score%28matchinfo%28articles_fts%2C+"pcx"%29%29+as+score%2C%0D%0A++++rank_bm25%28matchinfo%28articles_fts%2C+"pcnalx"%29%29+as+bm25%2C%0D%0A++++json_object%28%0D%0A++++++++"pre"%2C+annotate_matchinfo%28matchinfo%28articles_fts%2C+"pcxnalyb"%29%2C+"pcxnalyb"%29%0D%0A++++%29+as+annotated_matchinfo%2C%0D%0A++++matchinfo%28articles_fts%2C+"pcxnalyb"%29+as+matchinfo%2C%0D%0A++++decode_matchinfo%28matchinfo%28articles_fts%2C+"pcxnalyb"%29%29+as+decoded_matchinfo%0D%0Afrom%0D%0A++++articles_fts+join+articles+on+articles.rowid+%3D+articles_fts.rowid%0D%0Awhere%0D%0A++++articles_fts+match+%3Asearch%0D%0Aorder+by+bm25&search=jquery+maps).
 
+## Auditing and repairing stale FTS4 external-content indexes
+
+A detail table that is refreshed in daily batches often sits next to a
+separate FTS4 external-content index (`content=<table>`).  If a batch deletes
+a document and inserts a replacement that reuses the same rowid without
+re-indexing that row, the inverted index keeps the old document's terms even
+though fetching the rowid returns the new title: searches still match deleted
+words, but the row now points at unrelated content.  A rowid reused by a new
+document must never inherit the old document's terms.
+
+`sqlite_fts4.consistency` finds exactly those rows, using only real
+inverted-index hits as evidence.  For each term it runs an actual `MATCH`
+against the FTS table and reads the per-column hit count from
+`matchinfo(...,'pcx')`, then compares it against a throwaway probe FTS4 table
+that tokenizes the current content with the same tokenizer.  Each reported
+mismatch names the rowid, the FTS column, the stale terms (indexed but absent
+from the content) and the missing terms (in the content but not indexed).
+
+Audit only (no changes are written):
+
+    python -m sqlite_fts4 articles.db --fts articles_fts
+    python -m sqlite_fts4 articles.db --fts articles_fts --json
+
+Apply the evidenced repairs, then re-audit in the same run:
+
+    python -m sqlite_fts4 articles.db --fts articles_fts --apply
+
+Repairs are surgical and transactional.  Only rowids backed by mismatch
+evidence are touched, the detail table content is restored unchanged, and a
+second run over the same batch reports no new fixes.  Note that modern SQLite
+builds reject the FTS4 `delete`/`insert` special commands, so a repair
+temporarily restores the stale indexed text in the content table, removes the
+old postings with a plain `DELETE`, restores the current content and
+re-indexes that rowid; everything happens inside one transaction and is
+rolled back on failure.  Orphan postings whose content row is gone are
+unwound the same way without resurrecting the row.
+
+The same flow is available as a library:
+
+```python
+import sqlite3
+from sqlite_fts4.consistency import audit, repair, format_report
+
+conn = sqlite3.connect("articles.db")
+result = audit(conn, "articles_fts")
+print(format_report(result))
+# Only call repair after reviewing result.mismatches.
+repair(conn, result)
+assert audit(conn, "articles_fts").mismatches == ()
+```
+
 ## Installation
 
     pip install sqlite-fts4
