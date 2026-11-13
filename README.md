@@ -146,3 +146,74 @@ The returned JSON will include a key for each letter in the format string. For e
     }
 }
 ```
+
+## Counting concept mentions (distinct documents and first sources)
+
+The `sqlite_fts4.mentions` module counts how many distinct documents mention
+a business concept, while respecting a controlled dictionary. A concept has
+one or more aliases, each with an optional validity window (`valid_from` /
+`valid_to`), and may be declared as contained by a longer concept.
+
+```python
+from sqlite_fts4.mentions import Dictionary
+
+dictionary = Dictionary.from_dicts([
+    {
+        "canonical": "甲",
+        "contained_by": ["甲二代"],
+        "aliases": [
+            {"text": "甲"},
+            {"text": "代号甲", "valid_from": "2025-06-01"},
+        ],
+    },
+    {"canonical": "甲二代", "aliases": [{"text": "甲二代"}]},
+])
+```
+
+Rules applied by `count_from_fts(conn, fts_table, dictionary, docs)`:
+
+- An alias only counts for a document when the document's publication date
+  falls inside that alias's validity window.
+- Matching is based on FTS4 `offsets()` byte spans. When a short and a long
+  term hit the same span, the containing concept is credited; if the short
+  term also has a standalone occurrence in the same document, that document
+  still counts for both concepts. Containment is applied transitively.
+- Hits in the title and the body of the same FTS row are one document, so the
+  distinct-document count is never inflated by a duplicate mention.
+- The returned `FirstMention` carries `doc_id`, date, column, character offset
+  and a snippet, so the earliest source can be independently re-checked.
+- Alias text that exists in the raw columns but cannot be found through the
+  FTS index (for example unsegmented CJK under the stock tokenizers) is
+  reported in `notes` instead of being silently counted or ignored.
+
+```python
+from sqlite_fts4.mentions import load_doc_meta, count_from_fts
+
+docs = load_doc_meta(conn, "articles", "pub_date", id_column="doc_id")
+reports = count_from_fts(conn, "articles_fts", dictionary, docs)
+report = reports["甲"]
+report.exact            # exact distinct-document count
+report.doc_ids          # which documents count
+report.first_mention    # verifiable earliest occurrence
+report.suppressed       # documents absorbed by a containing concept
+```
+
+### When only aggregate statistics survived
+
+If row-level FTS data is unavailable and only retained totals exist, use
+`bounds_from_aggregates(...)`. Alias overlap, title/body duplicates and
+containment can no longer be resolved, so it never emits a single fabricated
+number: it returns a provable interval (`lower_bound`, `upper_bound` with
+`exact=None`), flags inconsistent retained totals, and only treats an earliest
+reference as verifiable when it includes a document identifier.
+
+```python
+from sqlite_fts4.mentions import bounds_from_aggregates
+
+bounds = bounds_from_aggregates(
+    dictionary,
+    alias_doc_counts={("甲", "甲"): 10, ("甲", "代号甲"): 4},
+    corpus_size=12,
+)
+bounds["甲"].lower_bound, bounds["甲"].upper_bound  # (10, 12)
+```

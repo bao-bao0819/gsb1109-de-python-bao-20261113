@@ -4,6 +4,41 @@ import json
 import traceback
 from functools import wraps
 
+from .mentions import (
+    Alias,
+    Dictionary,
+    DictionaryEntry,
+    DocMeta,
+    FirstMention,
+    ConceptReport,
+    Suppression,
+    fetch_hits,
+    load_doc_meta,
+    count_from_fts,
+    bounds_from_aggregates,
+)
+
+
+__all__ = [
+    "register_functions",
+    "rank_score",
+    "decode_matchinfo",
+    "decode_matchinfo_str",
+    "annotate_matchinfo",
+    "rank_bm25",
+    "Alias",
+    "Dictionary",
+    "DictionaryEntry",
+    "DocMeta",
+    "FirstMention",
+    "ConceptReport",
+    "Suppression",
+    "fetch_hits",
+    "load_doc_meta",
+    "count_from_fts",
+    "bounds_from_aggregates",
+]
+
 
 def register_functions(conn):
     "Registers these custom functions against an SQLite connection"
