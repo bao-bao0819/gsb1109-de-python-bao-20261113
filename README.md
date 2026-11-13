@@ -342,6 +342,71 @@ Examples
 
     ```
 
+Simultaneous blindness
+----------------------
+
+Outage records often give only an earliest start, a latest end, and a core
+segment that was certainly blind.  When two links share a clock skew, every
+event in that skew group must be shifted by the same amount.
+
+`simultaneous_blindness_range()` returns the shortest and the longest possible
+joint-blind duration inside a query window, each with a witness:
+
+``` python
+>>> from intervaltree import simultaneous_blindness_range
+>>> result = simultaneous_blindness_range(
+...     [(10, 20, 12, 16)],
+...     [(12, 18, 13, 17)],
+...     window=(0, 100),
+... )
+>>> result.minimum, result.maximum
+(3, 6)
+>>> result.lower.overlap
+[(13, 16)]
+>>> result.upper.overlap
+[(12, 18)]
+
+```
+
+With a shared clock group, both events move together:
+
+``` python
+>>> result = simultaneous_blindness_range(
+...     [(10, 20, 12, 16, 'g')],
+...     [(12, 18, 13, 17, 'g')],
+...     window=(0, 100),
+...     clock_groups={'g': (-5, 5)},
+... )
+>>> result.minimum, result.maximum
+(3.0, 6.0)
+
+```
+
+The witness for each bound is self-contained: `result.lower.offsets` gives one
+offset per clock group, `result.lower.intervals` gives the shifted intervals,
+and `result.lower.overlap` gives the merged joint-blind segments.  Adding the
+lengths in `overlap` reproduces `result.minimum` (and likewise for `upper`).
+Only the part of each outage inside the query window is measured.
+
+The same scenario can be read from JSON:
+
+``` sh
+python -m intervaltree.blindness --text scenario.json
+```
+
+``` json
+{
+  "window": [0, 100],
+  "clock_groups": {"g": [-5, 5]},
+  "links": {
+    "north": [{"earliest_start": 10, "latest_end": 20,
+               "core": [12, 16], "group": "g"}],
+    "south": [{"earliest_start": 12, "latest_end": 18,
+               "core": [13, 17], "group": "g"}]
+  }
+}
+```
+
 Future improvements
 -------------------
 

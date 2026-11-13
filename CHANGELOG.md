@@ -1,5 +1,14 @@
 # Change log
 
+## Unreleased
+- Added:
+  - `simultaneous_blindness_range()`: lower/upper bounds on two-link
+    simultaneous blindness, with a self-consistent per-bound witness
+    (clock offsets plus concrete intervals). Shared clock-skew groups move
+    rigidly; the query window clips the result.
+  - `python -m intervaltree.blindness` for JSON scenarios, with `--text`
+    witness output.
+
 ## Version 3.2.2
 - Fixed:
   - Better subclassing support: Determine classes dynamically,
