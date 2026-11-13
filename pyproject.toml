@@ -1,0 +1,206 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+    "setuptools>=61.2",
+]
+
+[project]
+authors = [
+    { email = "christian.ledermann@gmail.com", name = "Christian Ledermann" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: Hypothesis",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: GraalPy",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typing_extensions",
+]
+description = "A basic implementation of the __geo_interface__"
+dynamic = [
+    "version",
+]
+keywords = [
+    "GIS",
+    "Hypothesis",
+    "Spatial",
+    "WKT",
+]
+license = "LGPL-2.1-or-later"
+license-files = [
+    "LICENSE",
+    "docs/LICENSE.rst",
+]
+name = "pygeoif"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+complexity = [
+    "complexipy",
+    "lizard",
+    "radon",
+]
+dev = [
+    "pre-commit",
+    "pygeoif[complexity]",
+    "pygeoif[linting]",
+    "pygeoif[tests]",
+    "pygeoif[typing]",
+]
+hypothesis = [
+    "hypothesis",
+]
+linting = [
+    "ruff",
+    "yamllint",
+]
+tests = [
+    "hypothesis",
+    "more_itertools",
+    "pytest",
+    "pytest-cov",
+]
+typing = [
+    "hypothesis",
+    "mypy",
+]
+
+[project.readme]
+content-type = "text/x-rst"
+file = "README.rst"
+
+[project.urls]
+Changelog = "https://github.com/cleder/pygeoif/blob/develop/docs/HISTORY.rst"
+Documentation = "https://pygeoif.readthedocs.io/"
+Homepage = "https://github.com/cleder/pygeoif/"
+
+[tool.coverage.paths]
+source = [
+    "pygeoif",
+    "tests",
+]
+
+[tool.coverage.run]
+branch = true
+
+[tool.flake8]
+max_line_length = 88
+
+[tool.isort]
+force_single_line = true
+line_length = 88
+
+[tool.mypy]
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+enable_error_code = [
+    "ignore-without-code",
+]
+ignore_errors = false
+ignore_missing_imports = false
+implicit_reexport = false
+no_implicit_optional = true
+overrides = [
+    { disallow_untyped_defs = false, ignore_errors = true, module = "tests.*" },
+]
+show_error_codes = true
+strict_equality = true
+strict_optional = true
+warn_no_return = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[tool.pyright]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules",
+    ".pyre",
+    ".pytype",
+    "pygeoif/tests",
+]
+include = [
+    "pygeoif",
+]
+reportMissingImports = true
+reportMissingTypeStubs = true
+
+[tool.ruff]
+fix = true
+
+[tool.ruff.lint]
+ignore = [
+    "D203",
+    "D212",
+    "FA100",
+    "PLW1641",
+]
+select = [
+    "ALL",
+]
+
+[tool.ruff.lint.flake8-builtins]
+builtins-allowed-modules = [
+    "types",
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.per-file-ignores]
+"pygeoif/factories.py" = [
+    "SLF001",
+]
+"pygeoif/geometry.py" = [
+    "D417",
+    "FBT001",
+    "FBT002",
+]
+"tests/*.py" = [
+    "ANN001",
+    "ANN201",
+    "D101",
+    "D102",
+    "D103",
+    "FBT001",
+    "FBT003",
+    "PGH001",
+    "PGH003",
+    "PLR2004",
+    "RUF012",
+    "S101",
+    "S307",
+    "S311",
+    "SLF001",
+]
+
+[tool.setuptools.dynamic.version]
+attr = "pygeoif.about.__version__"
+
+[tool.setuptools.packages.find]
+exclude = [
+    "docs*",
+]
+include = [
+    "pygeoif*",
+    "pygeoif/py.typed",
+]
