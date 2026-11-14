@@ -77,6 +77,14 @@ referencing.retrieval
 .. autoclass:: referencing.retrieval._T
 
 
+referencing.compliance
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.compliance
+   :members:
+   :undoc-members:
+
+
 referencing.typing
 ^^^^^^^^^^^^^^^^^^
 
