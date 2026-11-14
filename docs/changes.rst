@@ -2,6 +2,11 @@
 Changelog
 =========
 
+Next release
+------------
+
+* Add a `referencing.migration` submodule for comparing two resource-set versions behind the business entries actually in use, producing the minimal list of fields whose parsing conclusion changes while treating relocated-but-equivalent field definitions as unchanged and reporting anything outside the supplied equivalence criteria as undecided.
+
 v0.37.0
 -------
 
