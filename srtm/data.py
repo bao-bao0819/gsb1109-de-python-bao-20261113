@@ -24,9 +24,41 @@ import re as mod_re
 import struct as mod_struct
 import requests as mod_requests
 
+from dataclasses import dataclass, field
+
 from . import utils as mod_utils
 
 from typing import *
+
+
+@dataclass
+class ExcludedSupport:
+    """
+    A grid sample that was not allowed to contribute to an IDW query.
+
+    distance is in the same unit as utils.distance (meters) and reason is one
+    of: 'void', 'outside_valid_region' or 'blocked_by_barrier[i].segment[j]'.
+    """
+    latitude: float
+    longitude: float
+    elevation: Optional[float]
+    distance: float
+    reason: str
+
+
+@dataclass
+class IDWResult:
+    """
+    Outcome of an inverse-distance-weighted query.
+
+    elevation is None when no valid support point remains (the caller must
+    treat the location as missing data). excluded lists every candidate sample
+    that was dropped, ordered from nearest to farthest so the closest rejected
+    point and its exclusion reason are easy to report.
+    """
+    elevation: Optional[float]
+    used_points: int = 0
+    excluded: List[ExcludedSupport] = field(default_factory=list)
 
 class GeoElevationData:
     """
@@ -36,17 +68,43 @@ class GeoElevationData:
     """
 
     def __init__(self, srtm1_files: Dict[str, str], srtm3_files: Dict[str, str], file_handler: mod_utils.FileHandler,
-                 leave_zipped: bool=False, batch_mode: bool=False, timeout: int = 0) -> None:
+                 leave_zipped: bool=False, batch_mode: bool=False, timeout: int = 0,
+                 barriers: Any=None, valid_regions: Any=None) -> None:
         self.srtm1_files = srtm1_files
         self.srtm3_files = srtm3_files
         self.leave_zipped = leave_zipped
         self.file_handler = file_handler # TODO: file_handler mypy
         self.timeout = timeout
 
+        # Barrier lines and sampling valid regions in global (lat, lon)
+        # coordinates. They are stored here rather than on individual tiles so
+        # the same barrier can cross file boundaries unchanged.
+        self.barriers: List[mod_utils.Polyline] = mod_utils.normalize_barriers(barriers)
+        self.valid_regions: List[mod_utils.Polyline] = mod_utils.normalize_valid_regions(valid_regions)
+
         # Lazy loaded files used in current app:
         self.files: Dict[str, GeoElevationFile] = {}
 
         self.batch_mode = batch_mode
+
+    def set_barriers(self, barriers: Any) -> None:
+        """
+        Replace the barrier lines used by subsequent IDW queries.
+
+        barriers is a polyline [(lat, lon), ...] or a list of such polylines.
+        Coordinates are global, so one barrier may span multiple .hgt tiles.
+        """
+        self.barriers = mod_utils.normalize_barriers(barriers)
+
+    def set_valid_regions(self, valid_regions: Any) -> None:
+        """
+        Replace the polygons inside which grid samples may contribute.
+
+        valid_regions is a closed ring [(lat, lon), ...] or a list of rings.
+        Samples outside every ring are ignored. Call with None to remove the
+        restriction.
+        """
+        self.valid_regions = mod_utils.normalize_valid_regions(valid_regions)
 
     def get_elevation(self, latitude: float, longitude: float, approximate: bool=False) -> Optional[float]:
         geo_elevation_file = self.get_file(float(latitude), float(longitude))
@@ -59,7 +117,8 @@ class GeoElevationData:
 
         return geo_elevation_file.get_elevation(float(latitude), float(longitude), approximate)
 
-    def _IDW(self, latitude: float, longitude: float, radius: float=1) -> Optional[float]:
+    def _IDW(self, latitude: float, longitude: float, radius: float=1,
+             barriers: Any=None, valid_regions: Any=None) -> Optional[float]:
         """
         Return the interpolated elevation at a point.
 
@@ -73,16 +132,50 @@ class GeoElevationData:
             longitude: float with the longitude in decimal degrees
             radius: int of 1 or 2 indicating the approximate radius
                 of adjacent cells to include
+            barriers: optional barrier polylines (see set_barriers). When
+                omitted the dataset's configured barriers are used. A support
+                point whose straight path to the query point crosses a barrier
+                does not contribute.
+            valid_regions: optional sampling polygons (see set_valid_regions).
+                When omitted the dataset's configured regions are used.
 
         Returns:
             a float of the interpolated elevation with the same unit
-            as the .hgt file (meters)
+            as the .hgt file (meters), or None when no valid support point
+            remains after applying voids, barriers and valid regions
 
+        """
+        result = self._IDW_detailed(latitude, longitude, radius,
+                                    barriers=barriers,
+                                    valid_regions=valid_regions)
+        if result is None:
+            return None
+        return result.elevation
+
+    def _IDW_detailed(self, latitude: float, longitude: float, radius: float=1,
+                      barriers: Any=None, valid_regions: Any=None) -> Optional[IDWResult]:
+        """
+        Like _IDW, but return an IDWResult describing which support points were
+        used and, when the elevation is missing, why the nearest candidates
+        were excluded.
+
+        Returns None only when no tile covers the queried location.
         """
         tile = self.get_file(latitude, longitude)
         if tile is None:
             return None
-        return tile._InverseDistanceWeighted(latitude, longitude, radius)
+        if barriers is None:
+            barrier_lines = self.barriers
+        else:
+            barrier_lines = mod_utils.normalize_barriers(barriers)
+        if valid_regions is None:
+            region_rings = self.valid_regions
+        else:
+            region_rings = mod_utils.normalize_valid_regions(valid_regions)
+        result = tile._InverseDistanceWeightedDetailed(latitude, longitude, radius,
+                                                       barriers=barrier_lines,
+                                                       valid_regions=region_rings)
+        return result
 
     def get_file(self, latitude: float, longitude: float) -> Optional["GeoElevationFile"]:
         """
@@ -414,9 +507,28 @@ class GeoElevationFile:
 
         return None
 
-    def _InverseDistanceWeighted(self, latitude: float, longitude: float, radius: float=1) -> Optional[float]:
+    def _InverseDistanceWeighted(self, latitude: float, longitude: float, radius: float=1,
+                                 barriers: Optional[List[mod_utils.Polyline]]=None,
+                                 valid_regions: Optional[List[mod_utils.Polyline]]=None
+                                 ) -> Optional[float]:
         """
-        Return the Inverse Distance Weighted Elevation.
+        Return the Inverse Distance Weighted elevation as a bare float.
+
+        See _InverseDistanceWeightedDetailed for the barrier and valid region
+        semantics. Returns None when every candidate support point is excluded
+        by a void, a valid region or a barrier.
+        """
+        result = self._InverseDistanceWeightedDetailed(latitude, longitude, radius,
+                                                       barriers=barriers,
+                                                       valid_regions=valid_regions)
+        return result.elevation
+
+    def _InverseDistanceWeightedDetailed(self, latitude: float, longitude: float, radius: float=1,
+                                         barriers: Optional[List[mod_utils.Polyline]]=None,
+                                         valid_regions: Optional[List[mod_utils.Polyline]]=None
+                                         ) -> IDWResult:
+        """
+        Return the Inverse Distance Weighted elevation with full diagnostics.
 
         Interpolate the elevation of the given point using the inverse
         distance weigthing algorithm (exp of 1) in the form:
@@ -432,10 +544,18 @@ class GeoElevationFile:
             latitude: float of the latitude in decimal degrees
             longitude: float of the longitude in decimal degrees
             radius: int of 1 or 2 indicating the size of the matrix
+            barriers: optional list of barrier polylines in (lat, lon)
+                coordinates. A support point is dropped when the segment from
+                the query point to it crosses a barrier. A support point lying
+                on a barrier (including a barrier endpoint) is dropped, while a
+                path that only grazes a barrier endpoint is allowed.
+            valid_regions: optional list of closed (lat, lon) rings; support
+                points outside every ring are dropped.
 
         Returns:
-            a float of the interpolated elevation in the same units as
-            the underlying .hgt file (meters)
+            an IDWResult whose elevation is None when no valid support point
+            remains, and whose excluded list reports every rejected candidate
+            (nearest first) with the reason for its exclusion
 
         Exceptions:
             raises a ValueError if an invalid radius is supplied
@@ -455,28 +575,84 @@ class GeoElevationFile:
             raise ValueError("Radius {} invalid, "
                              "expected 1 or 2".format(radius))
 
+        barriers = barriers or []
+        valid_regions = valid_regions or []
+
         row, column = self.get_row_and_column(latitude, longitude)
         center_lat, center_long = self.get_lat_and_long(row, column)
         if latitude == center_lat and longitude == center_long:
-            # return direct elev at point (infinite weight)
-            return self.get_elevation_from_row_and_column(int(row), int(column))
-        weights: float = 0
-        elevation: float = 0
+            # return direct elev at point (infinite weight). A zero-length path
+            # cannot cross a barrier, so this sample always stands on its own.
+            exact_elevation = self.get_elevation_from_row_and_column(int(row), int(column))
+            if exact_elevation is None:
+                return IDWResult(None, 0, [])
+            return IDWResult(exact_elevation, 1, [])
+
+        query_point: mod_utils.Point = (latitude, longitude)
+        candidates: List[Tuple[float, Optional[float], float, float]] = []
 
         for offset in offsetmatrix:
             if (offset is not None and
                 0 <= row + offset[0] < self.square_side and
                 0 <= column + offset[1] < self.square_side):
+                support_lat = center_lat + float(offset[0])/(self.square_side-1)
+                support_long = center_long + float(offset[1])/(self.square_side-1)
                 cell = self.get_elevation_from_row_and_column(int(row + offset[0]),
                                                               int(column + offset[1]))
-                if cell is not None:
-                    # does not need to be meters, anything proportional
-                    distance = mod_utils.distance(latitude, longitude,
-                                                  center_lat + float(offset[0])/(self.square_side-1),
-                                                  center_long + float(offset[1])/(self.square_side-1))
-                    weights += 1/distance
-                    elevation += cell/distance
-        return elevation/weights
+                # does not need to be meters, anything proportional
+                cell_distance = mod_utils.distance(latitude, longitude,
+                                                   support_lat, support_long)
+                candidates.append((cell_distance, cell, support_lat, support_long))
+
+        # Without constraints keep the historical computation (and summation
+        # order) exactly:
+        if not barriers and not valid_regions:
+            weights: float = 0
+            elevation: float = 0
+            used_points = 0
+            excluded: List[ExcludedSupport] = []
+            for cell_distance, cell, support_lat, support_long in candidates:
+                if cell is None:
+                    excluded.append(ExcludedSupport(support_lat, support_long, None,
+                                                    cell_distance, 'void'))
+                    continue
+                weights += 1/cell_distance
+                elevation += cell/cell_distance
+                used_points += 1
+            if used_points == 0:
+                return IDWResult(None, 0, excluded)
+            return IDWResult(elevation/weights, used_points, excluded)
+
+        weights = 0
+        elevation = 0
+        used_points = 0
+        excluded = []
+
+        for cell_distance, cell, support_lat, support_long in sorted(candidates, key=lambda item: item[0]):
+            support_point: mod_utils.Point = (support_lat, support_long)
+            if cell is None:
+                excluded.append(ExcludedSupport(support_lat, support_long, None,
+                                                cell_distance, 'void'))
+                continue
+            if not mod_utils.point_in_valid_regions(support_point, valid_regions):
+                excluded.append(ExcludedSupport(support_lat, support_long, cell,
+                                                cell_distance,
+                                                'outside_valid_region'))
+                continue
+            blocker = mod_utils.path_blocked_by_barriers(query_point,
+                                                         support_point, barriers)
+            if blocker is not None:
+                reason = 'blocked_by_barrier[{0}].segment[{1}]'.format(blocker[0], blocker[1])
+                excluded.append(ExcludedSupport(support_lat, support_long, cell,
+                                                cell_distance, reason))
+                continue
+            weights += 1/cell_distance
+            elevation += cell/cell_distance
+            used_points += 1
+
+        if used_points == 0:
+            return IDWResult(None, 0, excluded)
+        return IDWResult(elevation/weights, used_points, excluded)
 
     def get_elevation_from_row_and_column(self, row: int, column: int) -> Optional[float]:
         i = row * (self.square_side) + column

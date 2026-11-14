@@ -31,7 +31,8 @@ package_location = mod_data.__file__[: mod_data.__file__.rfind(mod_path.sep)]
 DEFAULT_LIST_JSON = package_location + mod_os.sep + 'list.json'
 
 def get_data(srtm1: bool=True, srtm3: bool=True, leave_zipped: bool=False, file_handler: Optional[mod_utils.FileHandler]=None,
-             use_included_urls: bool=True, batch_mode: bool=False, local_cache_dir: str = "", timeout: int = 0) -> mod_data.GeoElevationData:
+             use_included_urls: bool=True, batch_mode: bool=False, local_cache_dir: str = "", timeout: int = 0,
+             barriers: Any=None, valid_regions: Any=None) -> mod_data.GeoElevationData:
     """
     Get the utility object for querying elevation data.
 
@@ -64,6 +65,14 @@ def get_data(srtm1: bool=True, srtm3: bool=True, leave_zipped: bool=False, file_
     Srtm1 has a resolution of one arc-second (cca 30 meters). Srtm1 is
     available only for the United states. If both srtm1 ans srtm3 are True and
     both files are present for a location -- the srtm1 will be used.
+
+    barriers is an optional polyline [(lat, lon), ...] or a list of such
+    polylines acting as barriers for IDW interpolation: a support point is
+    ignored when the path to the query point crosses a barrier. Coordinates are
+    global, so a single barrier can span multiple SRTM files.
+
+    valid_regions is an optional polygon ring [(lat, lon), ...] or a list of
+    rings; IDW support points outside every ring are ignored.
     """
     if not file_handler:
         file_handler = mod_utils.FileHandler(local_cache_dir)
@@ -85,7 +94,8 @@ def get_data(srtm1: bool=True, srtm3: bool=True, leave_zipped: bool=False, file_
 
     return mod_data.GeoElevationData(srtm1_files, srtm3_files, file_handler=file_handler,
                                      leave_zipped=leave_zipped, batch_mode=batch_mode,
-                                     timeout=timeout)
+                                     timeout=timeout, barriers=barriers,
+                                     valid_regions=valid_regions)
 
 def _get_urls(use_included_urls: bool, file_handler: mod_utils.FileHandler, timeout: int) -> Tuple[Dict[str, str], Dict[str, str]]:
     files_list_file_name = 'list.json'

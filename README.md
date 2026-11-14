@@ -22,6 +22,53 @@ Cache files with urls of all SRTM files are generated in your HOME directory. In
     elevation_data = srtm.get_data(local_cache_dir="mydir")
     print('CGN Airport elevation (meters):', elevation_data.get_elevation(50.8682, 7.1377))
 
+## Inverse distance weighted interpolation with barriers
+
+`get_elevation` returns the raw nearest grid cell. For sub-cell locations the
+library also offers inverse distance weighted (IDW) interpolation through
+`_IDW`. When the elevation grid contains voids (for example around a dam or a
+reservoir), a sample on the other side of the dam may be geometrically close
+but physically unrelated. Optional **barrier lines** and **sampling valid
+regions** prevent such samples from contributing:
+
+    import srtm
+    # A barrier is a (latitude, longitude) polyline, or a list of polylines.
+    # Coordinates are global, so one barrier may span several SRTM files.
+    dam_barrier = [(44.18, -71.60), (44.17, -71.59)]
+    elevation_data = srtm.get_data(barriers=dam_barrier)
+    elevation = elevation_data._IDW(44.1756325, -71.5965699)
+
+A support point contributes only when the straight path from the query point
+to it does not cross a barrier. The boundary rules are explicit:
+
+ * a support point lying on a barrier, including at a barrier endpoint, is excluded,
+ * a proper transversal crossing is excluded,
+ * a collinear overlap with the barrier is excluded,
+ * a path that merely grazes a barrier endpoint is allowed, and
+ * when the query point itself sits on the barrier, paths departing from it are
+   allowed unless one of the rules above applies.
+
+Barriers can also be configured or replaced after construction with
+`elevation_data.set_barriers(...)`, and individual queries can override the
+configured barriers (or valid regions) with their own arguments. Pass `None`
+or an empty list to remove the restriction.
+
+**Valid regions** restrict which grid samples are eligible at all:
+
+    valid_region = [[(44.18, -71.60), (44.18, -71.59), (44.17, -71.59), (44.17, -71.60)]]
+    elevation_data = srtm.get_data(valid_regions=valid_region)
+
+Use `_IDW_detailed` to get an `IDWResult` instead of a bare float. When the
+remaining valid support is insufficient, its `elevation` is `None` (missing
+data) and `excluded` lists every rejected candidate, nearest first, with the
+reason (`void`, `outside_valid_region`, or
+`blocked_by_barrier[i].segment[j]`) and its distance:
+
+    result = elevation_data._IDW_detailed(44.1756325, -71.5965699)
+    if result.elevation is None:
+        for rejected in result.excluded:
+            print(rejected.latitude, rejected.longitude, rejected.distance, rejected.reason)
+
 ## GPS Tracks
 
 You can add elevations for all points in a GPS track with:
