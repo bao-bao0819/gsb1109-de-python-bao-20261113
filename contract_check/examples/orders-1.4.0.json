@@ -1,0 +1,8 @@
+{
+  "product": "orders",
+  "version": "1.4.0",
+  "fields": [
+    {"name": "id", "type": "string", "required": true},
+    {"name": "status", "type": "enum", "values": ["active", "paused", "archived"], "required": true}
+  ]
+}
