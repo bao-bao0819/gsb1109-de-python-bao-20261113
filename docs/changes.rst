@@ -2,6 +2,11 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Add `referencing.migration`, for repairing persisted JSON Pointer references when a document folds objects into keyed arrays or moves and deletes fields.
+
 v0.37.0
 -------
 

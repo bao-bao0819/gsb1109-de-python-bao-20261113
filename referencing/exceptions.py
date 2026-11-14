@@ -163,3 +163,27 @@ class InvalidAnchor(Unresolvable):
             f"to use '#/{self.anchor}', as the slash is required *before each "
             "segment* of a JSON pointer."
         )
+
+
+@frozen
+class InvalidPointer(ValueError):
+    """
+    A string is not a syntactically valid JSON Pointer.
+    """
+
+    pointer: str
+
+    def __str__(self) -> str:
+        return f"{self.pointer!r} is not a valid JSON Pointer"
+
+
+@frozen
+class InvalidMigration(ValueError):
+    """
+    An entry in a migration mapping cannot be interpreted.
+    """
+
+    entry: object
+
+    def __str__(self) -> str:
+        return f"{self.entry!r} is not a valid migration mapping entry"

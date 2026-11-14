@@ -77,6 +77,14 @@ referencing.retrieval
 .. autoclass:: referencing.retrieval._T
 
 
+referencing.migration
+^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.migration
+   :members:
+   :undoc-members:
+
+
 referencing.typing
 ^^^^^^^^^^^^^^^^^^
 
