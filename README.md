@@ -13,6 +13,42 @@ Read [Exploring search relevance algorithms with SQLite](https://simonwillison.n
 
 You can try out these SQL functions [using this interactive demo](https://datasette-sqlite-fts4.datasette.io/24ways-fts4?sql=select%0D%0A++++json_object%28%0D%0A++++++++"label"%2C+articles.title%2C+"href"%2C+articles.url%0D%0A++++%29+as+article%2C%0D%0A++++articles.author%2C%0D%0A++++rank_score%28matchinfo%28articles_fts%2C+"pcx"%29%29+as+score%2C%0D%0A++++rank_bm25%28matchinfo%28articles_fts%2C+"pcnalx"%29%29+as+bm25%2C%0D%0A++++json_object%28%0D%0A++++++++"pre"%2C+annotate_matchinfo%28matchinfo%28articles_fts%2C+"pcxnalyb"%29%2C+"pcxnalyb"%29%0D%0A++++%29+as+annotated_matchinfo%2C%0D%0A++++matchinfo%28articles_fts%2C+"pcxnalyb"%29+as+matchinfo%2C%0D%0A++++decode_matchinfo%28matchinfo%28articles_fts%2C+"pcxnalyb"%29%29+as+decoded_matchinfo%0D%0Afrom%0D%0A++++articles_fts+join+articles+on+articles.rowid+%3D+articles_fts.rowid%0D%0Awhere%0D%0A++++articles_fts+match+%3Asearch%0D%0Aorder+by+bm25&search=jquery+maps).
 
+## Index migration comparison (`sqlite_fts4.migration`)
+
+When an FTS4 index is upgraded by splitting a single body column into two
+columns (e.g. summary and detail) and only the old single-column `matchinfo`
+blobs survive, this module builds a comparability table for reporting.
+
+```python
+from sqlite_fts4 import register_functions
+from sqlite_fts4.migration import (
+    recombine_columns, build_comparison, validate_comparison, render_markdown,
+)
+
+conn = sqlite3.connect(":memory:")
+register_functions(conn)
+# old: fts4(body), new: fts4(summary, detail), holding the same documents
+recombine_columns(conn, "new", ["summary", "detail"], "recombined")
+records = build_comparison(
+    conn, "old", "new", "recombined", "dog cat", ["dog", "cat"])
+exact, bounded, control_only = validate_comparison(records)
+print(render_markdown(records, "dog cat"))
+```
+
+Recovery properties of each `matchinfo` segment when merging two columns:
+
+- Exact: `p`, `n`, row and global term frequencies (`x`), row lengths (`l`)
+  are additive; per-phrase `docs_with_hits` is exact via a per-phrase
+  `MATCH` count or the `b` bitfield, which counts a document once even when
+  the phrase hits both columns.
+- Bounded: without intersection evidence, `docs_with_hits` is bounded by
+  `[max(d_i), min(n, sum(d_i))]`; the integer-rounded average column length
+  (`a`) is bounded by `[sum(a_i), sum(a_i) + c - 1]`.
+- Control-only: the longest phrase subsequence (`s`), `rank_bm25` and
+  `rank_score` cannot be derived from split columns. Recombining the columns
+  into one body column produces byte-identical `matchinfo` against the old
+  table, so every metric can be verified on the small-sample control table.
+
 ## Installation
 
     pip install sqlite-fts4
