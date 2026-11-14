@@ -1,0 +1,9 @@
+Added the :mod:`semver.release` module to plan the next release tags of
+parallel release lines in one batch. ``plan_releases`` derives each
+candidate from the line's base version, orders lines by priority and
+skips numbers that were published, reserved or revoked. Numbers already
+sent to customers are never reassigned, even when the release is
+withdrawn, and build metadata can no longer be used to fake a higher
+priority. Consumers can declare that one candidate must be released
+after another; circular or unbridgeable constraints now raise
+``ReleaseConstraintsError`` with the blocking lines.

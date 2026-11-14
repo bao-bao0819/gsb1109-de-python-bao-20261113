@@ -27,6 +27,14 @@ from ._deprecated import (
     process,
     main,
 )
+from .release import (
+    ReleaseCandidate,
+    ReleaseConstraintsError,
+    ReleaseLine,
+    ReleasePlanError,
+    ReleaseRegistry,
+    plan_releases,
+)
 from .version import Version, VersionInfo
 from .__about__ import (
     __version__,
@@ -62,6 +70,12 @@ __all__ = [
     "main",
     "Version",
     "VersionInfo",
+    "ReleaseLine",
+    "ReleaseCandidate",
+    "ReleaseRegistry",
+    "ReleasePlanError",
+    "ReleaseConstraintsError",
+    "plan_releases",
     "__version__",
     "__author__",
     "__maintainer__",

@@ -15,6 +15,7 @@ Using semver
    convert-version-into-different-types
    raise-parts-of-a-version
    increase-parts-of-a-version_prereleases
+   plan-release-tags
    compare-versions
    determine-version-equality
    compare-versions-through-expression

@@ -88,3 +88,20 @@ Version Handling :mod:`semver.version`
 .. autoclass:: semver.version.Version
    :members:
    :special-members: __iter__, __eq__, __ne__, __lt__, __le__, __gt__, __ge__, __getitem__, __hash__, __repr__, __str__
+
+
+Release Planning :mod:`semver.release`
+--------------------------------------
+
+.. automodule:: semver.release
+
+.. autoclass:: semver.release.ReleaseLine
+   :members:
+
+.. autoclass:: semver.release.ReleaseCandidate
+   :members:
+
+.. autoclass:: semver.release.ReleaseRegistry
+   :members:
+
+.. autofunction:: semver.release.plan_releases
