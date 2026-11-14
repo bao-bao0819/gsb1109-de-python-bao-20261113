@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    MutableMapping,
+    Sequence,
+)
 from enum import Enum
 from typing import Any, ClassVar, Generic, Protocol, TypeVar
 from urllib.parse import unquote, urldefrag, urljoin
@@ -619,6 +625,60 @@ class Resolved(Generic[D]):
 
 
 @frozen
+class AnchorExplanation(Generic[D]):
+    """
+    An explanation of how an anchor selected its resource.
+
+    For simple anchors the selection is trivial, but anchors in
+    specifications with dynamic scope (e.g. dynamic anchors) may
+    select a resource from an enclosing scope instead of their own.
+    """
+
+    #: The resource ultimately selected by the anchor.
+    resource: Resource[D]
+
+    #: URIs of the dynamic scope which participated in the selection.
+    scopes: tuple[URI, ...]
+
+    #: The resolved contents and resulting resolver.
+    resolved: Resolved[D]
+
+
+@frozen
+class Explanation(Generic[D]):
+    """
+    An explanation of how a reference was resolved by a `Resolver`.
+
+    Identical reference text may resolve to different resources
+    depending on the base URI and dynamic scope in effect (e.g. for
+    specifications with dynamic anchors). An `Explanation` records
+    which resource was ultimately selected and which scopes
+    participated in selecting it, alongside the resolution result.
+    """
+
+    #: The reference text, as provided.
+    ref: URI
+
+    #: The base URI the reference was resolved against.
+    base_uri: URI
+
+    #: The absolute URI (without fragment) which was looked up.
+    uri: URI
+
+    #: The fragment which was interpreted, or empty if there was none.
+    fragment: str
+
+    #: The resource ultimately selected by the resolution.
+    resource: Resource[D]
+
+    #: URIs of the dynamic scope which participated in the selection.
+    scopes: tuple[URI, ...]
+
+    #: The resolved contents and resulting resolver.
+    resolved: Resolved[D]
+
+
+@frozen
 class Resolver(Generic[D]):
     """
     A reference resolver.
@@ -692,6 +752,100 @@ class Resolver(Generic[D]):
         resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
         return Resolved(contents=retrieved.value.contents, resolver=resolver)
 
+    def explain(self, ref: URI) -> Explanation[D]:
+        """
+        Resolve the given reference, explaining how the result was selected.
+
+        Behaves exactly like `Resolver.lookup`, but returns an
+        `Explanation` which additionally records the base URI the
+        reference was resolved against, the resource ultimately
+        selected, and any dynamic scope which participated in the
+        selection.
+
+        Raises:
+
+            `exceptions.Unresolvable`
+
+                or a subclass thereof if the reference isn't resolvable
+
+        """
+        if ref.startswith("#"):
+            uri, fragment = self._base_uri, ref[1:]
+        else:
+            uri, fragment = urldefrag(urljoin(self._base_uri, ref))
+        try:
+            retrieved = self._registry.get_or_retrieve(uri)
+        except exceptions.NoSuchResource:
+            raise exceptions.Unresolvable(ref=ref) from None
+        except exceptions.Unretrievable as error:
+            raise exceptions.Unresolvable(ref=ref) from error
+
+        if fragment.startswith("/"):
+            resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
+            return Explanation(
+                ref=ref,
+                base_uri=self._base_uri,
+                uri=uri,
+                fragment=fragment,
+                resource=retrieved.value,
+                scopes=(),
+                resolved=retrieved.value.pointer(
+                    pointer=fragment,
+                    resolver=resolver,
+                ),
+            )
+
+        if fragment:
+            retrieved = retrieved.registry.anchor(uri, fragment)
+            resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
+            anchor = retrieved.value.explain(resolver=resolver)
+            return Explanation(
+                ref=ref,
+                base_uri=self._base_uri,
+                uri=uri,
+                fragment=fragment,
+                resource=anchor.resource,
+                scopes=anchor.scopes,
+                resolved=anchor.resolved,
+            )
+
+        resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
+        return Explanation(
+            ref=ref,
+            base_uri=self._base_uri,
+            uri=uri,
+            fragment=fragment,
+            resource=retrieved.value,
+            scopes=(),
+            resolved=Resolved(
+                contents=retrieved.value.contents,
+                resolver=resolver,
+            ),
+        )
+
+    def cached_lookup(
+        self,
+        ref: URI,
+        cache: MutableMapping[tuple[URI, URI, tuple[URI, ...]], Resolved[D]],
+    ) -> Resolved[D]:
+        """
+        Resolve the given reference, caching the result for reuse.
+
+        A cached result is reused only when the reference text, the
+        base URI, and the dynamic scope all match -- identical
+        reference text resolved under a different base URI or dynamic
+        scope (e.g. a dynamic reference reached via different entry
+        points) may denote different contents, and is therefore cached
+        separately, so that results never depend on lookup order.
+
+        The provided cache may be any mutable mapping, and should not
+        be shared across unrelated registries.
+        """
+        key = (ref, self._base_uri, tuple(self._previous))
+        if key not in cache:
+            cache[key] = self.lookup(ref)
+        return cache[key]
+
     def in_subresource(self, subresource: Resource[D]) -> Resolver[D]:
         """
         Create a resolver for a subresource (which may have a new base URI).
@@ -732,3 +886,13 @@ class Anchor(Generic[D]):
         Return the resource for this anchor.
         """
         return Resolved(contents=self.resource.contents, resolver=resolver)
+
+    def explain(self, resolver: Resolver[D]) -> AnchorExplanation[D]:
+        """
+        Resolve this anchor, explaining how the resource was selected.
+        """
+        return AnchorExplanation(
+            resource=self.resource,
+            scopes=(),
+            resolved=self.resolve(resolver),
+        )

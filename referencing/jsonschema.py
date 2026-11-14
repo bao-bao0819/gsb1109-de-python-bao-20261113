@@ -11,6 +11,7 @@ from referencing import Anchor, Registry, Resource, Specification, exceptions
 from referencing._attrs import frozen
 from referencing._core import (
     _UNSET,  # type: ignore[reportPrivateUsage]
+    AnchorExplanation,
     Resolved as _Resolved,
     Resolver as _Resolver,
     _Unset,  # type: ignore[reportPrivateUsage]
@@ -605,7 +606,21 @@ class DynamicAnchor:
         """
         Resolve this anchor dynamically.
         """
+        return self.explain(resolver).resolved
+
+    def explain(
+        self,
+        resolver: _Resolver[Schema],
+    ) -> AnchorExplanation[Schema]:
+        """
+        Resolve this anchor dynamically, explaining the selection.
+
+        The outermost matching dynamic anchor in the dynamic scope is
+        selected; the returned explanation records each scope which
+        contributed a matching anchor to the selection.
+        """
         last = self.resource
+        scopes = []
         for uri, registry in resolver.dynamic_scope():
             try:
                 anchor = registry.anchor(uri, self.name).value
@@ -613,9 +628,14 @@ class DynamicAnchor:
                 continue
             if isinstance(anchor, DynamicAnchor):
                 last = anchor.resource
-        return _Resolved(
-            contents=last.contents,
-            resolver=resolver.in_subresource(last),
+                scopes.append(uri)
+        return AnchorExplanation(
+            resource=last,
+            scopes=tuple(scopes),
+            resolved=_Resolved(
+                contents=last.contents,
+                resolver=resolver.in_subresource(last),
+            ),
         )
 
 

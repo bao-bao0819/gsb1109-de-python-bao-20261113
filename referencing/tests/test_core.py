@@ -959,6 +959,90 @@ class TestResolver:
         ]
         assert list(first.resolver.dynamic_scope()) == []
 
+    def test_explain_whole_resource(self):
+        root = ID_AND_CHILDREN.create_resource(
+            {"ID": "http://example.com/", "foo": 12},
+        )
+        resolver = (root @ Registry()).resolver()
+
+        explanation = resolver.explain("http://example.com/")
+        assert explanation.ref == "http://example.com/"
+        assert explanation.base_uri == ""
+        assert explanation.uri == "http://example.com/"
+        assert explanation.fragment == ""
+        assert explanation.resource == root
+        assert explanation.scopes == ()
+        assert explanation.resolved.contents == root.contents
+
+    def test_explain_pointer(self):
+        root = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "http://example.com/",
+                "children": [{"ID": "child/", "foo": 12}],
+            },
+        )
+        resolver = (root @ Registry()).resolver()
+
+        explanation = resolver.explain("http://example.com/#/children/0")
+        assert explanation.uri == "http://example.com/"
+        assert explanation.fragment == "/children/0"
+        assert explanation.resource == root
+        assert explanation.scopes == ()
+        assert explanation.resolved.contents == {"ID": "child/", "foo": 12}
+
+    def test_explain_static_anchor(self):
+        root = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "http://example.com/",
+                "anchors": {"foo": {"bar": 12}},
+            },
+        )
+        resolver = (root @ Registry()).resolver()
+
+        explanation = resolver.explain("http://example.com/#foo")
+        assert explanation.uri == "http://example.com/"
+        assert explanation.fragment == "foo"
+        assert explanation.resource.contents == {"bar": 12}
+        assert explanation.scopes == ()
+        assert explanation.resolved.contents == {"bar": 12}
+
+    def test_explain_unresolvable(self):
+        resolver = Registry().resolver()
+        with pytest.raises(exceptions.Unresolvable):
+            resolver.explain("http://example.com/")
+
+    def test_cached_lookup_reuses_results(self):
+        root = ID_AND_CHILDREN.create_resource(
+            {"ID": "http://example.com/", "foo": 12},
+        )
+        resolver = (root @ Registry()).resolver()
+
+        cache = {}
+        first = resolver.cached_lookup("http://example.com/", cache)
+        second = resolver.cached_lookup("http://example.com/", cache)
+        assert first is second
+        assert len(cache) == 1
+
+    def test_cached_lookup_distinguishes_dynamic_scope(self):
+        one = ID_AND_CHILDREN.create_resource({"ID": "http://example.com/one"})
+        two = ID_AND_CHILDREN.create_resource({"ID": "http://example.com/two"})
+        shared = ID_AND_CHILDREN.create_resource(
+            {"ID": "http://example.com/shared", "foo": 12},
+        )
+        registry = [one, two, shared] @ Registry()
+        resolver = registry.resolver()
+
+        cache = {}
+        first = resolver.lookup("http://example.com/one")
+        second = resolver.lookup("http://example.com/two")
+        # Identical reference text, resolved against identical base URIs
+        # but under different dynamic scopes, is cached separately.
+        via_one = first.resolver.lookup("http://example.com/shared").resolver
+        via_two = second.resolver.lookup("http://example.com/shared").resolver
+        assert via_one.cached_lookup("#", cache).contents["foo"] == 12
+        assert via_two.cached_lookup("#", cache).contents["foo"] == 12
+        assert len(cache) == 2
+
 
 class TestSpecification:
     def test_create_resource(self):

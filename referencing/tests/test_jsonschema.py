@@ -380,3 +380,116 @@ def test_multiple_lookup_recursive_ref_with_nonrecursive_ref():
 
 def test_empty_registry():
     assert referencing.jsonschema.EMPTY_REGISTRY == Registry()
+
+
+def _reporting_registry():
+    """
+    A registry modelling a shared contract template and two filings.
+
+    The ``line-item`` template declares a ``taxAmount`` dynamic anchor
+    with a default, which each filing entry point redefines via its own
+    matching ``$dynamicAnchor``.
+    """
+    template = referencing.jsonschema.DRAFT202012.create_resource(
+        {
+            "$id": "https://example.com/contracts/line-item",
+            "$dynamicAnchor": "taxAmount",
+            "$defs": {"money": {"type": "number"}},
+            "type": "object",
+        },
+    )
+    vat = referencing.jsonschema.DRAFT202012.create_resource(
+        {
+            "$id": "https://example.com/filings/vat",
+            "$defs": {
+                "taxAmount": {"$dynamicAnchor": "taxAmount", "const": 20},
+            },
+            "$ref": "../contracts/line-item",
+        },
+    )
+    gst = referencing.jsonschema.DRAFT202012.create_resource(
+        {
+            "$id": "https://example.com/filings/gst",
+            "$defs": {
+                "taxAmount": {"$dynamicAnchor": "taxAmount", "const": 7},
+            },
+            "$ref": "../contracts/line-item",
+        },
+    )
+    return Registry().with_resources(
+        [
+            ("https://example.com/contracts/line-item", template),
+            ("https://example.com/filings/vat", vat),
+            ("https://example.com/filings/gst", gst),
+        ],
+    )
+
+
+def _line_item_resolver(registry, entry_point):
+    """
+    Resolve the template as reached from the given filing entry point.
+    """
+    entry = registry.resolver().lookup(entry_point)
+    return entry.resolver.lookup("../contracts/line-item").resolver
+
+
+def test_explain_dynamic_anchor_selects_entry_point_resource():
+    registry = _reporting_registry()
+
+    vat = _line_item_resolver(registry, "https://example.com/filings/vat")
+    explanation = vat.explain("#taxAmount")
+    assert explanation.ref == "#taxAmount"
+    assert explanation.base_uri == "https://example.com/contracts/line-item"
+    assert explanation.uri == "https://example.com/contracts/line-item"
+    assert explanation.fragment == "taxAmount"
+    assert explanation.resource.contents == {
+        "$dynamicAnchor": "taxAmount",
+        "const": 20,
+    }
+    assert explanation.scopes == ("https://example.com/filings/vat",)
+    assert explanation.resolved.contents == explanation.resource.contents
+
+    gst = _line_item_resolver(registry, "https://example.com/filings/gst")
+    explanation = gst.explain("#taxAmount")
+    assert explanation.resource.contents == {
+        "$dynamicAnchor": "taxAmount",
+        "const": 7,
+    }
+    assert explanation.scopes == ("https://example.com/filings/gst",)
+
+
+def test_explain_static_reference_uses_original_base_uri():
+    registry = _reporting_registry()
+
+    entry = registry.resolver().lookup("https://example.com/filings/vat")
+    explanation = entry.resolver.explain("../contracts/line-item")
+    assert explanation.base_uri == "https://example.com/filings/vat"
+    assert explanation.uri == "https://example.com/contracts/line-item"
+    assert explanation.scopes == ()
+
+    line_item = explanation.resolved.resolver
+    money = line_item.explain("#/$defs/money")
+    assert money.base_uri == "https://example.com/contracts/line-item"
+    assert money.uri == "https://example.com/contracts/line-item"
+    assert money.resolved.contents == {"type": "number"}
+    assert money.scopes == ()
+
+
+def test_cached_lookup_is_independent_of_entry_point_order():
+    registry = _reporting_registry()
+
+    cache = {}
+    for _ in range(3):
+        vat = _line_item_resolver(registry, "https://example.com/filings/vat")
+        gst = _line_item_resolver(registry, "https://example.com/filings/gst")
+        assert vat.cached_lookup("#taxAmount", cache).contents["const"] == 20
+        assert gst.cached_lookup("#taxAmount", cache).contents["const"] == 7
+    assert len(cache) == 2
+
+    cache = {}
+    for _ in range(3):
+        gst = _line_item_resolver(registry, "https://example.com/filings/gst")
+        vat = _line_item_resolver(registry, "https://example.com/filings/vat")
+        assert gst.cached_lookup("#taxAmount", cache).contents["const"] == 7
+        assert vat.cached_lookup("#taxAmount", cache).contents["const"] == 20
+    assert len(cache) == 2

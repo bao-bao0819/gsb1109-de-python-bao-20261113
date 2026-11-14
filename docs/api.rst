@@ -22,6 +22,16 @@ Plainly then, you may rely on their methods and attributes not changing in backw
    :undoc-members:
 
 
+.. autoclass:: referencing._core.Explanation
+   :members:
+   :undoc-members:
+
+
+.. autoclass:: referencing._core.AnchorExplanation
+   :members:
+   :undoc-members:
+
+
 .. autoclass:: referencing._core.Retrieved
    :members:
    :undoc-members:

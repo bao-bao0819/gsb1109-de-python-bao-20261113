@@ -8,7 +8,12 @@ from collections.abc import Mapping as Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 if TYPE_CHECKING:
-    from referencing._core import Resolved, Resolver, Resource
+    from referencing._core import (
+        AnchorExplanation,
+        Resolved,
+        Resolver,
+        Resource,
+    )
 
 #: A URI which identifies a `Resource`.
 URI = str
@@ -52,5 +57,11 @@ class Anchor(Protocol[D]):
     def resolve(self, resolver: Resolver[D]) -> Resolved[D]:
         """
         Return the resource for this anchor.
+        """
+        ...
+
+    def explain(self, resolver: Resolver[D]) -> AnchorExplanation[D]:
+        """
+        Resolve this anchor, explaining how the resource was selected.
         """
         ...
