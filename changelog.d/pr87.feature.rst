@@ -1,0 +1,6 @@
+Added ``semver.device_uptime`` with ``version_time_bounds`` to attribute
+device online *duration* (instead of heartbeat counts) to versions. The
+report gives lower and upper duration bounds per version, including a
+dedicated unknown-version bucket, from one self-consistent evolution path
+per device so upgrades and filed rollbacks between two observations are
+not assumed to last until the end of an observation gap.

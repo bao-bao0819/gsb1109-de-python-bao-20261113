@@ -27,6 +27,13 @@ from ._deprecated import (
     process,
     main,
 )
+from .device_uptime import (
+    Observation,
+    VersionDuration,
+    VersionShare,
+    VersionTimeReport,
+    version_time_bounds,
+)
 from .version import Version, VersionInfo
 from .__about__ import (
     __version__,
@@ -62,6 +69,11 @@ __all__ = [
     "main",
     "Version",
     "VersionInfo",
+    "Observation",
+    "VersionDuration",
+    "VersionShare",
+    "VersionTimeReport",
+    "version_time_bounds",
     "__version__",
     "__author__",
     "__maintainer__",
