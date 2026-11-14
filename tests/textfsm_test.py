@@ -749,6 +749,209 @@ class UnitTestFSM(unittest.TestCase):
     result = t.ParseText(data)
     self.assertListEqual(result, [[['one'], 'two']])
 
+  def testGroupedList(self):
+    """Parallel readings stay bound to their own channel."""
+    tplt = (
+        r'Value List,Group Channel (\d+)' '\n'
+        r'Value List,Group Rx ((?:\S+)?)' '\n'
+        r'Value List,Group Tx (\S+)' '\n'
+        r'Value Port (\S+)' '\n'
+        '\nStart\n'
+        r'  ^Port ${Port}' '\n'
+        r'  ^\s+${Channel}\s+${Rx}\s+${Tx}' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    self.assertEqual(t.header, ['Channel', 'Port'])
+
+    data = 'Port eth1/1\n  1 1.0 2.0\n  2  4.0\n  3 5.0 6.0\n'
+    result = t.ParseText(data)
+    self.assertListEqual(
+        result,
+        [[
+            [
+                {'Channel': '1', 'Rx': '1.0', 'Tx': '2.0'},
+                {'Channel': '2', 'Rx': '', 'Tx': '4.0'},
+                {'Channel': '3', 'Rx': '5.0', 'Tx': '6.0'},
+            ],
+            'eth1/1',
+        ]],
+    )
+
+  def testGroupedListMergesRepeated(self):
+    """Identical re-reports of the same channel are merged."""
+    tplt = (
+        r'Value List,Group Channel (\d+)' '\n'
+        r'Value List,Group Rx (\S+)' '\n'
+        r'Value List,Group Tx (\S+)' '\n'
+        '\nStart\n'
+        r'  ^\s+${Channel}\s+${Rx}\s+${Tx}' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    data = '  1 1.0 2.0\n  1 1.0 2.0\n'
+    result = t.ParseText(data)
+    self.assertListEqual(
+        result, [[[{'Channel': '1', 'Rx': '1.0', 'Tx': '2.0'}]]]
+    )
+
+  def testGroupedListKeepsConflictingSource(self):
+    """Different readings for one channel are kept with their source line."""
+    tplt = (
+        r'Value List,Group Channel (\d+)' '\n'
+        r'Value List,Group Rx (\S+)' '\n'
+        r'Value List,Group Tx (\S+)' '\n'
+        '\nStart\n'
+        r'  ^\s+${Channel}\s+${Rx}\s+${Tx}' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    data = '  1 1.0 2.0\n  1 9.9 2.0\n'
+    result = t.ParseText(data)
+
+    items = result[0][0]
+    self.assertEqual(len(items), 2)
+    self.assertDictEqual(
+        items[0], {'Channel': '1', 'Rx': '1.0', 'Tx': '2.0'}
+    )
+    self.assertDictEqual(
+        items[1],
+        {
+            'Channel': '1',
+            'Rx': '9.9',
+            'Tx': '2.0',
+            '_line': 2,
+            '_source': '  1 9.9 2.0',
+        },
+    )
+    self.assertEqual(items[1].source_line, 2)
+    self.assertEqual(items[1].source_text, '  1 9.9 2.0')
+
+  def testGroupedListAcrossLines(self):
+    """Readings spread over lines still land in their channel."""
+    tplt = (
+        r'Value List,Group Channel (\d+)' '\n'
+        r'Value List,Group Rx (\S+)' '\n'
+        r'Value List,Group Tx (\S+)' '\n'
+        '\nStart\n'
+        r'  ^Channel\s+${Channel}' '\n'
+        r'  ^\s+Rx:\s+${Rx}' '\n'
+        r'  ^\s+Tx:\s+${Tx}' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    data = (
+        'Channel 1\n  Rx: 1.0\n  Tx: 2.0\n'
+        'Channel 2\n  Rx: --\n'
+        'Channel 3\n  Tx: 6.0\n'
+    )
+    result = t.ParseText(data)
+    self.assertListEqual(
+        result,
+        [[
+            [
+                {'Channel': '1', 'Rx': '1.0', 'Tx': '2.0'},
+                {'Channel': '2', 'Rx': '--', 'Tx': ''},
+                {'Channel': '3', 'Rx': '', 'Tx': '6.0'},
+            ]
+        ]],
+    )
+
+  def testGroupedListMergeAcrossChannels(self):
+    """A later identical report merges into the earlier channel entry."""
+    tplt = (
+        r'Value List,Group Channel (\d+)' '\n'
+        r'Value List,Group Rx (\S+)' '\n'
+        r'Value List,Group Tx (\S+)' '\n'
+        '\nStart\n'
+        r'  ^Channel\s+${Channel}' '\n'
+        r'  ^\s+Rx:\s+${Rx}' '\n'
+        r'  ^\s+Tx:\s+${Tx}' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    data = (
+        'Channel 1\n  Rx: 1.0\n  Tx: 2.0\n'
+        'Channel 2\n  Rx: 3.0\n  Tx: 4.0\n'
+        'Channel 1\n  Rx: 1.0\n  Tx: 2.0\n'
+    )
+    result = t.ParseText(data)
+    self.assertListEqual(
+        result,
+        [[
+            [
+                {'Channel': '1', 'Rx': '1.0', 'Tx': '2.0'},
+                {'Channel': '2', 'Rx': '3.0', 'Tx': '4.0'},
+            ]
+        ]],
+    )
+
+  def testGroupedListKeepsPlainList(self):
+    """Unmarked List values keep their existing single-list behaviour."""
+    tplt = (
+        'Value List boo (on.)\n'
+        'Value hoo (tw.)\n\n'
+        'Start\n  ^$boo\n  ^$hoo -> Next.Record\n\n'
+        'EOF'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    data = 'one\ntwo\non0\ntw0'
+    result = t.ParseText(data)
+    self.assertListEqual(result, [[['one'], 'two'], [['on0'], 'tw0']])
+
+  def testGroupedListAliases(self):
+    """Grouped and GroupedList are accepted spellings of Group."""
+    for option in ('Group', 'Grouped', 'GroupedList'):
+      tplt = (
+          r'Value List,%s Channel (\d+)' % option + '\n'
+          r'Value List,%s Rx ((?:\S+)?)' % option + '\n'
+          r'Value List,%s Tx (\S+)' % option + '\n'
+          '\nStart\n'
+          r'  ^\s+${Channel}\s+${Rx}\s+${Tx}' '\n'
+          r'  ^\s*$$ -> Record' '\n'
+      )
+      t = textfsm.TextFSM(io.StringIO(tplt))
+      self.assertEqual(t.header, ['Channel'])
+      result = t.ParseText('  1 1 2\n  2  4\n')
+      self.assertListEqual(
+          result,
+          [[[
+              {'Channel': '1', 'Rx': '1', 'Tx': '2'},
+              {'Channel': '2', 'Rx': '', 'Tx': '4'},
+          ]]],
+      )
+
+  def testGroupedListExplicitBoundary(self):
+    """Group(Channel) binds readings to an existing Value Channel."""
+    tplt = (
+        r'Value Channel (\d+)' '\n'
+        r'Value List,Group(Channel) Rx ((?:\S+)?)' '\n'
+        r'Value List,Group(Channel) Tx ((?:\S+)?)' '\n'
+        '\nStart\n'
+        r'  ^\s+${Channel}\s+${Rx}(\s+${Tx})?' '\n'
+        r'  ^\s*$$ -> Record' '\n'
+    )
+
+    t = textfsm.TextFSM(io.StringIO(tplt))
+    self.assertEqual(t.header, ['Channel', 'Rx'])
+    result = t.ParseText('  1 1.0\n  2 2.0 3.0\n')
+    self.assertListEqual(
+        result,
+        [[
+            '2',
+            [
+                {'Channel': '1', 'Rx': '1.0', 'Tx': ''},
+                {'Channel': '2', 'Rx': '2.0', 'Tx': '3.0'},
+            ],
+        ]],
+    )
+
   def testNestedMatching(self):
     """List-type values with nested regex capture groups are parsed correctly.
 

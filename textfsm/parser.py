@@ -85,10 +85,15 @@ class TextFSMOptions(object):
 
     def __init__(self, value):
       self.value = value
+      self.argument = None
 
     @property
     def name(self):
       return self.__class__.__name__.replace('option', '')
+
+    def TemplateName(self):
+      """Returns how this option is spelled in a template."""
+      return self.name
 
     def OnCreateOptions(self):
       """Called after all options have been parsed for a Value."""
@@ -184,6 +189,8 @@ class TextFSMOptions(object):
       self.OnClearAllVar()
 
     def OnAssignVar(self):
+      if any(isinstance(o, TextFSMOptions.Group) for o in self.value.options):
+        return
       # Nested matches will have more than one match group
       if self.value.compiled_regex.groups > 1:
         match = self.value.compiled_regex.match(self.value.value)
@@ -204,7 +211,284 @@ class TextFSMOptions(object):
       self._value = []
 
     def OnSaveRecord(self):
+      if any(isinstance(o, TextFSMOptions.Group) for o in self.value.options):
+        return
       self.value.value = list(self._value)
+
+  class Group(OptionBase):
+    # pylint: disable=g-space-before-docstring-summary
+    r"""Value takes the form of a list of grouped sub-items.
+
+    Ordinary parallel ``List`` Values append one entry per match.  If a
+    sub-item has no reading for one of them, later readings slide into the
+    wrong sub-item.  ``Group`` binds the readings of a sub-item around a
+    boundary, so a missing reading keeps its own empty slot.
+
+    Eg.
+    Value List,Group Channel (\d+)
+    Value List,Group Rx (\S*)
+    Value List,Group Tx (\S*)
+
+    The first Group Value is the boundary unless a boundary is named:
+    ``Value List,Group(Channel) Rx (\S*)`` groups around ``Value Channel``.
+
+    A sub-item is emitted as a dict holding the boundary and every grouped
+    reading.  A reading that was not seen is an empty string.
+
+    Repeated identical sub-items are merged.  When the same boundary is
+    reported with different readings, every interpretation is kept and gains a
+    ``_line`` member with the 1-based input line that contributed it.
+
+    Only the first Group Value of a group appears in the header and record;
+    the other Group Values are omitted.
+    """
+
+    def OnCreateOptions(self):
+      self._items = []
+      self._current = None
+      self._pending = {}
+      self._pending_line = None
+      self._pending_text = ''
+
+    is_group = True
+    takes_argument = True
+
+    @property
+    def group_key(self):
+      """Identity shared by Values grouped together."""
+      return self.argument or ''
+
+    def TemplateName(self):
+      if self.argument:
+        return '%s(%s)' % (self.name, self.argument)
+      return self.name
+
+    def _Members(self):
+      """Returns the Values in this group, in template order."""
+      fsm = self.value.fsm
+      if fsm is None:
+        return [self.value]
+      return [
+          value
+          for value in fsm.values
+          if any(
+              getattr(option, 'is_group', False)
+              and option.group_key == self.group_key
+              for option in value.options
+          )
+      ] or [self.value]
+
+    def _Owner(self):
+      """Returns the Group option of the first member Value."""
+      members = self._Members()
+      if not members:
+        return self
+      for option in members[0].options:
+        if (
+            isinstance(option, TextFSMOptions.Group)
+            and option.group_key == self.group_key
+        ):
+          return option
+      return self
+
+    def _BoundaryName(self):
+      """Returns the name of the reading that starts a new sub-item."""
+      if self.argument:
+        return self.argument
+      members = self._Members()
+      return members[0].name if members else self.value.name
+
+    def _FieldNames(self):
+      """Returns sub-item keys: boundary first, then grouped readings."""
+      names = [self._BoundaryName()]
+      names.extend(value.name for value in self._Members())
+      return list(dict.fromkeys(names))
+
+    def OnVarAssigned(self, name, value):
+      owner = self._Owner()
+      if name not in owner._FieldNames():
+        return
+      owner._pending[name] = value or ''
+
+    def OnBeginLine(self, line_num, line=''):
+      owner = self._Owner()
+      owner._pending = {}
+      owner._pending_line = line_num
+      owner._pending_text = line
+
+    def OnEndLine(self):
+      self._Owner()._CommitPending()
+
+    def _BoundaryValue(self, pending):
+      """Returns the boundary reading for the current line."""
+      boundary_name = self._BoundaryName()
+      if boundary_name in pending:
+        return pending[boundary_name]
+      fsm = self.value.fsm
+      if fsm is not None:
+        value = fsm._GetValue(boundary_name)  # pylint: disable=protected-access
+        if value is not None and value.value:
+          return value.value
+      return ''
+
+    def _CommitPending(self):
+      """Folds the readings seen on one input line into a sub-item."""
+      if not self._pending:
+        return
+      pending = self._pending
+      self._pending = {}
+      boundary_name = self._BoundaryName()
+      fields = self._FieldNames()
+      boundary = self._BoundaryValue(pending)
+      if not boundary and not any(
+          value for name, value in pending.items()
+          if name != boundary_name
+      ) and self._current is None:
+        return
+
+      if self._current is not None:
+        current_boundary = self._current.get(boundary_name, '')
+        if boundary and boundary != current_boundary:
+          self._FlushCurrent()
+        elif boundary and self._Conflicts(pending, boundary_name):
+          self._FlushCurrent()
+
+      if self._current is None:
+        self._current = {name: '' for name in fields}
+        self._current['_line'] = self._pending_line
+        self._current['_source'] = self._pending_text
+
+      for name, value in pending.items():
+        if value:
+          self._current[name] = value
+        else:
+          self._current.setdefault(name, '')
+      if boundary:
+        self._current[boundary_name] = boundary
+
+    def _Conflicts(self, pending, boundary_name):
+      """True when a boundary is re-reported with a different reading."""
+      for name, value in pending.items():
+        if name == boundary_name:
+          continue
+        previous = self._current.get(name, '')
+        if value and previous and value != previous:
+          return True
+      return False
+
+    def _FlushCurrent(self):
+      """Appends the current sub-item, merging identical repetitions."""
+      if self._current is None:
+        return
+      current = self._current
+      self._current = None
+      names = self._FieldNames()
+      values = {name: current.get(name, '') for name in names}
+      if not any(values.values()):
+        return
+      boundary_name = self._BoundaryName()
+      boundary = values.get(boundary_name, '')
+      for item in self._items:
+        if all(item.get(name, '') == values[name] for name in names):
+          return
+      conflicting = [
+          item
+          for item in self._items
+          if boundary and item.get(boundary_name, '') == boundary
+      ]
+      if conflicting:
+        for item in conflicting:
+          item.ExposeProvenance()
+        values['_line'] = current.get('_line')
+        values['_source'] = current.get('_source')
+      self._items.append(
+          GroupItem(
+              values,
+              line=current.get('_line'),
+              source=current.get('_source'),
+          )
+      )
+
+    def OnClearVar(self):
+      if 'Filldown' not in self.value.OptionNames():
+        self._Reset()
+
+    def OnClearAllVar(self):
+      self._Reset()
+
+    def OnGetValue(self):
+      if self._Owner() is not self:
+        raise SkipValue
+
+    def OnSaveRecord(self):
+      owner = self._Owner()
+      if owner is not self:
+        raise SkipValue
+      self._CommitPending()
+      self._FlushCurrent()
+      self.value.value = list(self._items)
+
+    def _Reset(self):
+      self._items = []
+      self._current = None
+      self._pending = {}
+      self._pending_line = None
+      self._pending_text = ''
+
+
+  class GroupedList(Group):
+    """Alias for Group."""
+
+
+  class Grouped(Group):
+    """Alias for Group."""
+
+
+class GroupItem(dict):
+  """A grouped sub-item that can record where it came from.
+
+  When a boundary is re-reported with different readings, each interpretation
+  keeps ``_line`` (the 1-based input line) and ``_source`` (that input line).
+  ``item.source_line`` exposes the line either way.  Equality ignores
+  provenance, so an item compares equal to the plain dict it represents.
+  """
+
+  PROVENANCE_KEYS = ('_line', '_source', 'source_line')
+
+  def __init__(self, values=None, line=None, source=None):
+    super().__init__(values or {})
+    self.source_line = line
+    self.source_text = source
+
+  def ExposeProvenance(self):
+    """Publishes the recorded provenance into the item itself."""
+    if '_line' not in self and self.source_line is not None:
+      dict.__setitem__(self, '_line', self.source_line)
+    if '_source' not in self and self.source_text is not None:
+      dict.__setitem__(self, '_source', self.source_text)
+
+  def __eq__(self, other):
+    if not isinstance(other, dict):
+      return NotImplemented
+    mine = {
+        key: value
+        for key, value in self.items()
+        if key not in self.PROVENANCE_KEYS
+    }
+    theirs = {
+        key: value
+        for key, value in other.items()
+        if key not in self.PROVENANCE_KEYS
+    }
+    return mine == theirs
+
+  def __ne__(self, other):
+    result = self.__eq__(other)
+    if result is NotImplemented:
+      return result
+    return not result
+
+  __hash__ = None
 
 
 class TextFSMValue(object):
@@ -330,22 +614,42 @@ class TextFSMValue(object):
     """Add an option to this Value.
 
     Args:
-      name: (str), the name of the Option to add.
+      name: (str), the name of the Option to add, optionally followed by a
+        parenthesized argument (eg. ``Group(Channel)``).
 
     Raises:
       TextFSMTemplateError: If option is already present or
         the option does not exist.
     """
 
+    option_name = name
+    argument = None
+    match = re.match(r'^(?P<name>\w+)\((?P<arg>[^()]*)\)$', name)
+    if match:
+      option_name = match.group('name')
+      argument = match.group('arg')
+
     # Check for duplicate option declaration
-    if name in [option.name for option in self.options]:
-      raise TextFSMTemplateError('Duplicate option "%s"' % name)
+    if option_name in [option.name for option in self.options]:
+      raise TextFSMTemplateError('Duplicate option "%s"' % option_name)
 
     # Create the option object
     try:
-      option = self._options_cls.GetOption(name)(self)
+      option = self._options_cls.GetOption(option_name)(self)
     except AttributeError as exc:
-      raise TextFSMTemplateError('Unknown option "%s"' % name) from exc
+      raise TextFSMTemplateError('Unknown option "%s"' % option_name) from exc
+
+    if argument is not None:
+      if not getattr(type(option), 'takes_argument', False):
+        raise TextFSMTemplateError(
+            'Option "%s" does not take an argument.' % option_name
+        )
+      if not re.match(r'^\w+$', argument):
+        raise TextFSMTemplateError(
+            'Option "%s" has an invalid argument "%s".'
+            % (option_name, argument)
+        )
+      option.argument = argument
 
     self.options.append(option)
 
@@ -358,7 +662,7 @@ class TextFSMValue(object):
 
     if self.options:
       return 'Value %s %s %s' % (
-          ','.join(self.OptionNames()),
+          ','.join([option.TemplateName() for option in self.options]),
           self.name,
           self.regex,
       )
@@ -913,8 +1217,10 @@ class TextFSM(object):
     if text:
       lines = text.splitlines()
 
-    for line in lines:
+    for line_num, line in enumerate(lines, 1):
+      self._ReportLineStart(line_num, line)
       self._CheckLine(line)
+      self._ReportLineEnd()
       if self._cur_state_name in ('End', 'EOF'):
         break
 
@@ -996,8 +1302,48 @@ class TextFSM(object):
       value: (str) The matched value.
     """
     self._value = self._GetValue(value)
-    if self._value is not None:
-      self._value.AssignVar(matched.group(value))
+    if self._value is None:
+      return
+    self._value.AssignVar(matched.group(value))
+    for option in self._GroupOptions():
+      option.OnVarAssigned(self._value.name, self._value.value)
+
+  def _GroupOptions(self):
+    """Yields the Group options active in this FSM."""
+    for value in self.values:
+      for option in value.options:
+        if getattr(option, 'is_group', False):
+          yield option
+
+  def _ReportLineStart(self, line_num, line=''):
+    """Tells grouped options that a new input line is starting."""
+    owners = set()
+    for option in self._GroupOptions():
+      owner = option._Owner()
+      if id(owner) in owners:
+        continue
+      owners.add(id(owner))
+      owner.OnBeginLine(line_num, line)
+
+  def _ReportLineEnd(self):
+    """Tells grouped options that an input line has been processed."""
+    owners = set()
+    for option in self._GroupOptions():
+      owner = option._Owner()
+      if id(owner) in owners:
+        continue
+      owners.add(id(owner))
+      owner.OnEndLine()
+
+  def _ReportLinePartial(self):
+    """Folds readings seen so far so a mid-line Record can include them."""
+    owners = set()
+    for option in self._GroupOptions():
+      owner = option._Owner()
+      if id(owner) in owners:
+        continue
+      owners.add(id(owner))
+      owner._CommitPending()  # pylint: disable=protected-access
 
   def _Operations(self, rule, line):
     """Operators on the data record.
@@ -1027,6 +1373,7 @@ class TextFSM(object):
     """
     # First process the Record operators.
     if rule.record_op == 'Record':
+      self._ReportLinePartial()
       self._AppendRecord()
 
     elif rule.record_op == 'Clear':

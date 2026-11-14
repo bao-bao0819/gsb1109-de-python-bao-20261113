@@ -22,6 +22,27 @@ licence for the benefit of the wider community.
 
 [**See documentation for more details.**](https://github.com/google/textfsm/wiki/TextFSM)
 
+Grouped lists
+-------------
+Parallel `List` values append one entry per match. If a row has no value for one
+of them, the following rows slide into the wrong entry. Mark the values with
+`Group` to bind every reading of a row together:
+
+```
+Value List,Group Channel (\d+)
+Value List,Group Rx (\S*)
+Value List,Group Tx (\S*)
+```
+
+The first grouped value is the boundary that starts a new entry unless a
+boundary is named with `Group(Channel)`. A reading that was not seen stays an
+empty string instead of borrowing the next row's value. Repeated identical
+entries are merged; different readings for the same boundary are both kept and
+carry `_line`/`_source` naming the input line that contributed them.
+
+Only the first grouped value appears in the header and record; the remaining
+values live inside its list of dicts. Plain `Value List` values are unchanged.
+
 Before contributing
 -------------------
 If you are not a Google employee, our lawyers insist that you sign a Contributor
