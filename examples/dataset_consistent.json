@@ -1,0 +1,35 @@
+{
+  "tolerance": 0.1,
+  "old": [
+    {
+      "id": "F1",
+      "geometry": "POLYGON((0 0, 4 0, 4 3, 0 3))"
+    },
+    {
+      "geometry": "POLYGON((0 10, 2 10, 1 12))"
+    },
+    {
+      "geometry": "POLYGON((0 10, 2 10, 1 12))"
+    },
+    {
+      "id": "F4",
+      "geometry": "POLYGON((10 10, 12 10, 11 12))"
+    }
+  ],
+  "new": [
+    {
+      "id": "F1",
+      "geometry": "POLYGON((2.05 1.0, 6.05 1.0, 6.05 4.05, 2.05 4.05))"
+    },
+    {
+      "geometry": "POLYGON((2 11, 4 11, 3 13))"
+    },
+    {
+      "geometry": "POLYGON((2 11, 4 11, 3 13))"
+    },
+    {
+      "id": "F4",
+      "geometry": "POLYGON((12 11, 14 11, 13 13))"
+    }
+  ]
+}
