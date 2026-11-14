@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vendor.example/schemas/invoices.json",
+  "title": "Invoice contract",
+  "type": "object",
+  "properties": {
+    "lines": {
+      "type": "array",
+      "items": { "$ref": "shared/money.json#amount" }
+    }
+  },
+  "$defs": {
+    "money": {
+      "$id": "shared/money.json",
+      "$anchor": "amount",
+      "title": "Monetary amount",
+      "type": "object",
+      "properties": {
+        "value": { "type": "number" },
+        "currency": { "type": "string" }
+      },
+      "required": ["value", "currency"]
+    }
+  }
+}

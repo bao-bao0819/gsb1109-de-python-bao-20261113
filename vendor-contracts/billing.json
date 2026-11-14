@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vendor.example/schemas/billing.json",
+  "title": "Billing contract",
+  "type": "object",
+  "properties": {
+    "billed": { "$ref": "#amount" }
+  },
+  "$defs": {
+    "amount": {
+      "$anchor": "amount",
+      "title": "Billed amount in cents",
+      "type": "integer"
+    }
+  }
+}
