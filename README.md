@@ -108,6 +108,36 @@ gpxelevations is a utility command line tool to add/update elevations in a GPS t
       -f FILE, --file FILE  Output filename
       -v, --verbose         Verbose output
 
+## Water level segments
+
+You can find the parts of a track which are above a given water level:
+
+    import srtm
+
+    elevation_data = srtm.get_data()
+    points = [(45.1, 13.1), (45.2, 13.2), (45.3, 13.3)]
+    result = elevation_data.get_water_level_segments(points, water_level=0)
+
+    for segment in result:
+        print(segment.kind, segment.start, segment.end, segment.length)
+
+Each point is interpolated bilinearly between the four SRTM grid nodes of its
+cell.  Along a straight piece of the track the elevation is therefore a
+quadratic, and every crossing is solved exactly.  This matters when both ends
+of a piece are above water but the piece dips below it in the middle: a
+fixed-step sampler would miss it.
+
+The result is a list of above-water sections (`kind == 'above'`) and sections
+which run exactly along the water line (`kind == 'contour'`).  Each section
+records how it ends in `start_edge`/`end_edge`: `'start'`, `'end'`,
+`'intersection'`, `'contour'` or `'no_data'`.  Real intersections with the
+water level are in `result.crossings` (with an `'up'`/`'down'` direction);
+stretches with missing SRTM data are in `result.missing` and are never
+reported as intersections.  Walking the same route backwards gives the same
+section lengths and swaps the crossing directions.
+
+The same function is available as `srtm.water.get_water_level_segments`.
+
 ## License
 
 SRTM.py is licensed under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)

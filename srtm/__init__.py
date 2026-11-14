@@ -15,5 +15,7 @@
 # limitations under the License.
 
 from . import main as mod_main
+from . import water as mod_water
 
 get_data = mod_main.get_data
+get_water_level_segments = mod_water.get_water_level_segments

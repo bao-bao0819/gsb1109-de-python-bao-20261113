@@ -20,11 +20,15 @@ Run all tests with:
 """
 
 import logging        as mod_logging
+import math           as mod_math
 import unittest       as mod_unittest
 import srtm           as mod_srtm
 from srtm import data as mod_data
 from srtm import main as mod_main
 from srtm import utils as mod_utils
+from srtm import water as mod_water
+
+from typing import *
 
 mod_logging.basicConfig(level=mod_logging.DEBUG,
                         format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
@@ -222,6 +226,107 @@ class Tests(mod_unittest.TestCase):
             self.assertLessEqual(IDW13_elevation, location[3])
 
         self.assertRaises(ValueError, tile._InverseDistanceWeighted, 44, -71, radius=0)
+
+    def _water_test_data(self) -> Tuple[mod_data.GeoElevationData, mod_data.GeoElevationFile]:
+        with open("test_files/N44W072.hgt","rb") as hgtfile:
+            hgt = hgtfile.read()
+        tilemap = mod_data.GeoElevationData({}, {}, file_handler=mod_utils.FileHandler("."))
+        tile = mod_data.GeoElevationFile('N44W072.hgt', hgt, tilemap)
+        tilemap.srtm3_files["N44W072.hgt"] = ""
+        tilemap.files["N44W072.hgt"] = tile
+        return tilemap, tile
+
+    def test_water_bilinear_matches_cell_corners(self) -> None:
+        tilemap, tile = self._water_test_data()
+        side = tile.square_side - 1
+        latitude, longitude = 44.1756325, -71.5965699
+        row_value = (tile.latitude + 1 - latitude) * side
+        column_value = (longitude - tile.longitude) * side
+        row, column = int(row_value), int(column_value)
+        u, v = row_value - row, column_value - column
+        z00 = tile.get_elevation_from_row_and_column(row, column)
+        z10 = tile.get_elevation_from_row_and_column(row + 1, column)
+        z01 = tile.get_elevation_from_row_and_column(row, column + 1)
+        z11 = tile.get_elevation_from_row_and_column(row + 1, column + 1)
+        expected = z00 + (z10 - z00) * u + (z01 - z00) * v + (z00 - z10 - z01 + z11) * u * v
+        self.assertAlmostEqual(mod_water.bilinear_elevation(tilemap, latitude, longitude), expected, places=6)
+
+    def test_water_dip_between_above_endpoints(self) -> None:
+        # Both ends of this chord are at 68 m, the middle dips to 50 m.
+        def elevation(latitude: float, longitude: float) -> Optional[float]:
+            row = int(mod_math.floor(latitude / 0.01))
+            column = int(mod_math.floor(longitude / 0.01))
+            u = ((row + 1) * 0.01 - latitude) / 0.01
+            v = (longitude - column * 0.01) / 0.01
+            return 100 - 100 * u - 100 * v + 200 * u * v
+
+        points = [(0.008, 0.002), (0.002, 0.008)]
+        result = mod_water.get_water_level_segments(None, points, 60, cell_size=0.01,
+                                                    elevation_function=elevation)
+        self.assertEqual(2, len(result))
+        self.assertTrue(all(segment.kind == 'above' for segment in result))
+        self.assertEqual(2, len(result.crossings))
+        self.assertEqual(['down', 'up'], [crossing.direction for crossing in result.crossings])
+        self.assertAlmostEqual(120.05, result.crossings[0].distance, places=1)
+        self.assertAlmostEqual(822.84, result.crossings[1].distance, places=1)
+
+    def test_water_reverse_route(self) -> None:
+        tilemap, _ = self._water_test_data()
+        points = [(44.1756325, -71.5965699), (44.3, -71.4), (44.5, -71.2)]
+        forward = mod_water.get_water_level_segments(tilemap, points, 400)
+        backward = mod_water.get_water_level_segments(tilemap, list(reversed(points)), 400)
+        self.assertAlmostEqual(forward.total_distance, backward.total_distance, places=6)
+        self.assertEqual(len(forward), len(backward))
+        forward_lengths = [segment.length for segment in forward]
+        backward_lengths = [segment.length for segment in reversed(backward)]
+        for first, second in zip(forward_lengths, backward_lengths):
+            self.assertAlmostEqual(first, second, places=6)
+        forward_directions = [crossing.direction for crossing in forward.crossings]
+        backward_directions = [crossing.direction for crossing in reversed(backward.crossings)]
+        expected = ['up' if direction == 'down' else 'down' for direction in forward_directions]
+        self.assertEqual(expected, backward_directions)
+
+    def test_water_contour_is_kept_separate(self) -> None:
+        # Elevation depends on latitude only, so lon=0.004 runs exactly at 60 m.
+        def elevation(latitude: float, longitude: float) -> Optional[float]:
+            row = int(mod_math.floor(latitude / 0.01))
+            return 100 * ((row + 1) * 0.01 - latitude) / 0.01
+
+        points = [(0.008, 0.001), (0.004, 0.001), (0.004, 0.009), (0.001, 0.009)]
+        result = mod_water.get_water_level_segments(None, points, 60, cell_size=0.01,
+                                                    elevation_function=elevation)
+        self.assertIn('contour', [segment.kind for segment in result])
+        backward = mod_water.get_water_level_segments(None, list(reversed(points)), 60,
+                                                      cell_size=0.01,
+                                                      elevation_function=elevation)
+        self.assertAlmostEqual(sum(segment.length for segment in result.contour_segments),
+                               sum(segment.length for segment in backward.contour_segments), places=6)
+
+    def test_water_missing_data_is_not_intersection(self) -> None:
+        tilemap, tile = self._water_test_data()
+        row, column = tile.get_row_and_column(44.5, -71.5)
+        raw = bytearray(tile.data)
+        index = (row * tile.square_side + column) * 2
+        raw[index] = 0x80
+        raw[index + 1] = 0
+        tile.data = bytes(raw)
+
+        resolution = tile.resolution
+        points = [(44.5 - 12 * resolution, -71.5 - 12 * resolution),
+                  (44.5 + 12 * resolution, -71.5 + 12 * resolution)]
+
+        result = mod_water.get_water_level_segments(tilemap, points, 300)
+        self.assertEqual(1, len(result.missing))
+        self.assertEqual([], result.crossings)
+        self.assertEqual(2, len(result))
+        self.assertEqual('no_data', result[0].end_edge)
+        self.assertEqual('no_data', result[1].start_edge)
+
+        backward = mod_water.get_water_level_segments(tilemap, list(reversed(points)), 300)
+        self.assertEqual([], backward.crossings)
+        self.assertAlmostEqual(result[0].length, backward[0].length, places=6)
+        self.assertAlmostEqual(result.missing[0].length, backward.missing[0].length, places=6)
+
             
 
     def test_batch_mode(self) -> None:

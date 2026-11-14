@@ -59,6 +59,18 @@ class GeoElevationData:
 
         return geo_elevation_file.get_elevation(float(latitude), float(longitude), approximate)
 
+    def get_water_level_segments(self, points: Any, water_level: float,
+                                 **kwargs: Any) -> Any:
+        """
+        Return the polyline sections at or above ``water_level``.
+
+        Elevations are bilinear between the four SRTM grid nodes around each
+        point and every crossing is solved exactly along the line.  See
+        :mod:`srtm.water` for the returned object.
+        """
+        from . import water as mod_water
+        return mod_water.get_water_level_segments(self, points, water_level, **kwargs)
+
     def _IDW(self, latitude: float, longitude: float, radius: float=1) -> Optional[float]:
         """
         Return the interpolated elevation at a point.
