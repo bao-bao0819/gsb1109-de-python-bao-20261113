@@ -28,6 +28,14 @@ from ._deprecated import (
     main,
 )
 from .version import Version, VersionInfo
+from .admission import (
+    AdmissionDecision,
+    Artifact,
+    ReleaseExemption,
+    ReleaseGate,
+    TraceEntry,
+    VersionRange,
+)
 from .__about__ import (
     __version__,
     __author__,
@@ -62,6 +70,12 @@ __all__ = [
     "main",
     "Version",
     "VersionInfo",
+    "VersionRange",
+    "ReleaseExemption",
+    "ReleaseGate",
+    "Artifact",
+    "AdmissionDecision",
+    "TraceEntry",
     "__version__",
     "__author__",
     "__maintainer__",

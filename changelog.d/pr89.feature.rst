@@ -1,0 +1,12 @@
+Added the historical admission gate in ``semver.admission``. It evaluates
+whether an artifact may be treated as a formal batch through a test format
+upload using time limited, source specific exemption clauses scoped to
+semantic version ranges.
+
+``VersionRange`` never promotes a prerelease to a release just because its
+numeric core is inside a range, and build scoped clauses never leak to other
+artifacts of the same priority. ``ReleaseGate`` separates the decision moment
+from the record knowledge cutoff, so the same snapshot can be reconstructed
+with the information available at upload time (``reconstruct``) or re-judged
+with records completed later (``reevaluate``). Every decision carries a full
+clause trace naming the clause in force or the reason each clause was skipped.

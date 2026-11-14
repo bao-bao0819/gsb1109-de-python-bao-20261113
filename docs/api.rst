@@ -88,3 +88,27 @@ Version Handling :mod:`semver.version`
 .. autoclass:: semver.version.Version
    :members:
    :special-members: __iter__, __eq__, __ne__, __lt__, __le__, __gt__, __ge__, __getitem__, __hash__, __repr__, __str__
+
+
+Historical Admission :mod:`semver.admission`
+--------------------------------------------
+
+.. automodule:: semver.admission
+
+.. autoclass:: semver.admission.VersionRange
+   :members:
+
+.. autoclass:: semver.admission.ReleaseExemption
+   :members:
+
+.. autoclass:: semver.admission.ReleaseGate
+   :members:
+
+.. autoclass:: semver.admission.Artifact
+   :members:
+
+.. autoclass:: semver.admission.AdmissionDecision
+   :members:
+
+.. autoclass:: semver.admission.TraceEntry
+   :members:

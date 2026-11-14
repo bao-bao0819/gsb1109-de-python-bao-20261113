@@ -19,3 +19,4 @@ Using semver
    determine-version-equality
    compare-versions-through-expression
    get-min-and-max-of-multiple-versions
+   historical-admission-decisions
