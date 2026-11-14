@@ -265,6 +265,7 @@ fabric.properties
 /*.py
 # but not this file:
 !/setup.py
+!/channel_order.py
 
 docs/_api
 !docs/_api/semver.__about__.rst
