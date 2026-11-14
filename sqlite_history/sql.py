@@ -30,6 +30,16 @@ def triggers_sql(table, columns):
     old_column_values = ", ".join("old." + escape_sqlite(column) for column in columns)
     # mask is a bit mask of all columns, so len(columns)
     mask = 2 ** len(columns) - 1
+    # Version numbers continue within the current lifecycle of the row only.
+    # A delete ends a lifecycle (_mask = -1); if the same rowid is inserted
+    # again afterwards it starts a new lifecycle at version 1, and later
+    # updates must not continue the numbering of the previous lifecycle.
+    next_version = (
+        "(SELECT COALESCE(MAX(_version), 0) FROM _{table}_history "
+        "WHERE _rowid = old.rowid AND rowid > COALESCE("
+        "(SELECT MAX(rowid) FROM _{table}_history "
+        "WHERE _rowid = old.rowid AND _mask = -1), 0)) + 1"
+    ).format(table=table)
     insert_trigger = """
 CREATE TRIGGER {table}_insert_history
 AFTER INSERT ON {table}
@@ -43,24 +53,28 @@ END;
         new_column_values=new_column_values,
         mask=mask,
     )
+    # "IS NOT" is null-safe: old != new would evaluate to null (not true)
+    # when either side is null, silently dropping changes to or from null.
+    # With IS NOT, clearing a column to null is recorded with the mask bit
+    # set and a null value, which reads back differently from "not touched".
     update_columns = []
     for column in columns:
         update_columns.append(
             """
-        CASE WHEN old.{column} != new.{column} then new.{column} else null end""".format(
+        CASE WHEN old.{column} IS NOT new.{column} then new.{column} else null end""".format(
                 column=escape_sqlite(column)
             )
         )
     update_columns_sql = ", ".join(update_columns)
     mask_sql = " + ".join(
-        """(CASE WHEN old.{column} != new.{column} then {base} else 0 end)""".format(
+        """(CASE WHEN old.{column} IS NOT new.{column} then {base} else 0 end)""".format(
             column=escape_sqlite(column),
             base=2**idx,
         )
         for idx, column in enumerate(columns)
     )
     where_sql = " or ".join(
-        "old.{column} != new.{column}".format(column=escape_sqlite(column))
+        "old.{column} IS NOT new.{column}".format(column=escape_sqlite(column))
         for column in columns
     )
     update_trigger = """
@@ -70,7 +84,7 @@ FOR EACH ROW
 BEGIN
     INSERT INTO _{table}_history (_rowid, {column_names}, _version, _updated, _mask)
     SELECT old.rowid, {update_columns_sql},
-        (SELECT MAX(_version) FROM _{table}_history WHERE _rowid = old.rowid) + 1,
+        {next_version},
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
         {mask_sql}
     WHERE {where_sql};
@@ -79,6 +93,7 @@ END;
         table=table,
         column_names=column_names,
         update_columns_sql=update_columns_sql,
+        next_version=next_version,
         mask_sql=mask_sql,
         where_sql=where_sql,
     )
@@ -90,13 +105,16 @@ BEGIN
     VALUES (
         old.rowid,
         {old_column_values},
-        (SELECT COALESCE(MAX(_version), 0) from _{table}_history WHERE _rowid = old.rowid) + 1,
+        {next_version},
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
         -1
     );
 END;
 """.format(
-        table=table, column_names=column_names, old_column_values=old_column_values
+        table=table,
+        column_names=column_names,
+        old_column_values=old_column_values,
+        next_version=next_version,
     )
     return insert_trigger + update_trigger + delete_trigger
 

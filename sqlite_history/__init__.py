@@ -1,4 +1,5 @@
 from .sql import backfill_sql, history_table_sql, triggers_sql, table_columns_and_types
+from .readback import UNKNOWN, row_state
 
 
 def configure_history(db, table):
