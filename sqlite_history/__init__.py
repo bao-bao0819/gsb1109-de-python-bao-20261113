@@ -1,4 +1,11 @@
 from .sql import backfill_sql, history_table_sql, triggers_sql, table_columns_and_types
+from .merge import (
+    MergeConflictError,
+    MergeReport,
+    create_receipt,
+    load_receipt,
+    merge_databases,
+)
 
 
 def configure_history(db, table):

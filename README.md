@@ -110,6 +110,55 @@ Tables with different schemas will have different `_mask` values.
 
 A `_mask` of `-1` indicates that the row was deleted.
 
+## Offline checkouts and merges
+
+A common pattern: a branch office checks out a snapshot of a table, edits it
+offline for a few days, then comes back to reconcile with HQ. Since both
+sides record history with this library, the merge can be done as a
+field-level three-way merge against the shared checkout point.
+
+At checkout time, record a receipt in the database (it travels with the
+file when the database is copied):
+
+    python -m sqlite_history checkout data.db
+
+Or from Python:
+
+    import sqlite_history
+    receipt_id = sqlite_history.create_receipt(conn)
+
+When the branch comes back, merge its database into HQ using that receipt:
+
+    python -m sqlite_history merge hq.db branch.db --receipt 1
+
+Or from Python:
+
+    report = sqlite_history.merge_databases(hq_conn, branch_conn, receipt_id)
+
+The merge follows these rules:
+
+- Fields changed on only one side merge cleanly.
+- A field changed to the *same* value on both sides keeps one business
+  value, but both sides are recorded as sources in `_merge_sources`.
+- A delete on one side versus fresh edits on the other is a conflict that
+  the delete always wins - the outcome never depends on the order in which
+  the two sides are examined. The conflict is recorded in
+  `_merge_conflicts`.
+- A field changed to *different* values on both sides is a conflict,
+  resolved by the `on_conflict` parameter (`"hq"` by default, `"branch"`,
+  or `"error"` to abort the merge) and recorded in `_merge_conflicts`.
+- A side that only brings back part of its version chain (gaps above the
+  receipt point, or a missing receipt point) is flagged in
+  `_merge_incomplete` as incomplete evidence. Its business values are not
+  applied and no old history is reconstructed from current values.
+- Re-merging the same receipt is idempotent: rows that already match are
+  left untouched, so no new business updates (and no duplicate provenance
+  rows) are generated. If the branch kept editing, only the new changes
+  are applied.
+
+Every merge is recorded in `_merge_log`.
+
+
 The following triggers are created to populate the `_people_history` table:
 <!-- [[[cog
 triggers_sql = sql.triggers_sql("people", [c[0] for c in columns_and_types])
