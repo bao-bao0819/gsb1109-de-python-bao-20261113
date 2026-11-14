@@ -14,3 +14,5 @@ htmlcov/
 SRTM.py.egg-info/
 .coverage
 .mypy_cache/
+demo_output/
+clearance_report/
