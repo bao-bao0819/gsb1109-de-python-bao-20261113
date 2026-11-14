@@ -49,6 +49,33 @@ Blue is raw-srtm-data elevations, in red is the smoothed (approximated) srtm dat
 
 You need [gpxpy](http://github.com/tkrajina/gpxpy) installed in order for this feature to work.
 
+## Depression merge tables
+
+Beyond "how much is flooded at one level", `srtm.basin_merges` answers "at which elevation do two depressions first connect". It builds a persistent, repeatedly queryable merge table from a local `.hgt` grid:
+
+    from srtm.basin_merges import build_from_hgt_file, load_basin_merge_table
+
+    table = build_from_hgt_file('test_files/N44W072.hgt')
+    table.save('N44W072_merges.json')   # build once, query many times
+    table.save_csv('N44W072_merges.csv')
+
+    reloaded = load_basin_merge_table('N44W072_merges.json')
+    reloaded.connection_level(0, 1)     # elevation where depressions 0 and 1 join, or None
+    reloaded.basin_for_query([0, 1])    # level, saddle position, members and flooded area
+
+Boundary conventions used by every query:
+
+ * SRTM no-data cells (outside `[-1000, 10000]`) are permanent barriers. They are never flooded and can never connect two depressions, so connectivity is never decided through a void.
+ * Connectivity is 4-connected (no diagonal touch); a cell at elevation `h` floods when the water reaches `h`.
+ * A saddle that joins three or more depressions at the same height is a single merge event with all of them as members, not several pairwise merges.
+ * The grid border is an open spill boundary. A depression reaching the border is recorded as a border spill rather than an inter-depression merge.
+
+The table is independent of cell reading order: shuffling the input cells, or rotating/reflecting the grid, leaves every merge elevation and member set unchanged (only cell coordinates follow the grid).
+
+From the command line:
+
+    python -m srtm.basin_merges test_files/N44W072.hgt --json merges.json --csv merges.csv
+
 ## Elevation images
 
 You can create elevation images with:
