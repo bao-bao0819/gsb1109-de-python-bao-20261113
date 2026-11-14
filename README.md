@@ -156,6 +156,62 @@ END;
 ```
 <!-- [[[end]]] -->
 
+## Compacting old history
+
+Sparse history tables accumulate one row per update even when each update
+touches only one column. The compaction tool folds old sparse updates while
+keeping every answer the table can give identical:
+
+    python -m sqlite_history.compact data.db table1 [table2 ...] \
+        --protect 2025-04-01 --protect 2025-09-15 \
+        --backup --verify
+
+Options:
+
+- `--protect YYYY-MM-DD`: history rows whose `_updated` falls on this UTC day
+  are kept byte-for-byte (repeatable). The materialized column values at each
+  protected point are verified to be unchanged.
+- `--cutoff YYYY-MM-DD`: every row at or after this day 00:00 UTC is kept.
+  Defaults to the first day of the current month (UTC), so arbitrary version
+  readback remains available for the whole current month.
+- `--dry-run`: print the plan (row counts, fold groups, protected/cutoff rows)
+  without touching the database.
+- `--backup`: copy the database to `<name>.pre-compact.db` before rewriting.
+- `--verify`: compare the compacted table against the backup and fail if any
+  protected row, post-cutoff readback or tombstone changed.
+
+### What is preserved
+
+Per `_rowid`, history is split into *generations* at each `_mask = -1`
+tombstone, so deletes and same-`_rowid` resurrections are handled separately.
+Within each generation these rows are always retained verbatim:
+
+- the first row (the generation baseline, needed to rebuild any earlier state),
+- every tombstone,
+- every row on a protected day,
+- every row at or after the cutoff.
+
+Any remaining old rows form runs between two retained rows. Each run is folded
+into a single sparse delta: the folded `_mask` is the bitwise union of the run
+and each column takes the **last** value explicitly set inside the run. The
+folded row keeps the `_version` and `_updated` of the last real row it
+replaces — versions are never renumbered and no synthetic timestamps are
+introduced, so every retained version still materializes to the same column
+values as before.
+
+### Unknown values vs explicit NULL
+
+A column whose mask bit is absent from every row of a generation is *unknown*
+(e.g. a column added later by `ALTER TABLE`). Folding only emits a column when
+its bit appears in the run, so an unknown baseline value stays unknown after
+compaction and is never backfilled from a later update. An explicit `NULL`
+(mask bit present, stored value `NULL`) is a real value and is preserved
+distinctly from unknown. The `as_of_table()` helper returns
+`(known, value)` pairs so callers can distinguish the two cases.
+
+The same logic is available from Python via `compact_history()`,
+`plan_compaction()` and `verify_compaction()` in `sqlite_history.compact`.
+
 ## Development
 
 To contribute to this library, first checkout the code. Then create a new virtual environment:
