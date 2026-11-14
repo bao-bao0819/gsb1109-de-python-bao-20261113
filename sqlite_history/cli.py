@@ -2,21 +2,21 @@ import argparse
 import sqlite3
 import os
 from . import configure_history
+from .sql import COMMITS_TABLE, SEQ_TABLE, STATE_TABLE
+
+INFRASTRUCTURE_TABLES = {COMMITS_TABLE, SEQ_TABLE, STATE_TABLE}
 
 
 def configure_triggers(database_path, tables):
     db = sqlite3.connect(database_path)
     for table in tables:
+        if table in INFRASTRUCTURE_TABLES:
+            continue
         if table.startswith("_") and table.endswith("_history"):
             continue
-        # Does a history table exist already?
-        history_table_name = f"_{table}_history"
-        cursor = db.execute(
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{history_table_name}';"
-        )
-        if cursor.fetchone():
-            print(f"History table {history_table_name} already exists - skipping.")
-            continue
+        # configure_history() is idempotent: a fresh table gets history
+        # triggers, while an existing old-style history table is migrated
+        # to the commit-aware schema in place.
         configure_history(db, table)
 
 

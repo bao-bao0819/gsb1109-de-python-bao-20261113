@@ -36,6 +36,73 @@ Use `--all` to configure it for all tables:
 
     python -m sqlite_history data.db --all
 
+## Cross-table commit ids
+
+When one business transaction writes to more than one table - for example
+deducting stock from warehouse A and crediting it to warehouse B - the rows
+it produces need a shared identifier so the two sides can be paired.
+Timestamps cannot do this, because several transactions can be recorded in the
+same millisecond.
+
+Wrap the writes in `sqlite_history.tracked()`. Every history row the triggers
+write while the block is open is stamped with the same integer commit id:
+
+    import sqlite_history
+
+    with sqlite_history.tracked(conn, note="transfer T-42") as tx:
+        conn.execute("UPDATE warehouse_a SET qty = qty - 30 WHERE sku = ?", (sku,))
+        conn.execute("UPDATE warehouse_b SET qty = qty + 30 WHERE sku = ?", (sku,))
+    print(tx.commit_id)  # e.g. 7
+
+The deduction row in `_warehouse_a_history` and the credit row in
+`_warehouse_b_history` both carry `_commit = 7`, so they can be joined as one
+logical posting without relying on timestamps. The id is allocated under
+SQLite's write lock (`BEGIN IMMEDIATE`), so concurrent connections - even ones
+committing in the same millisecond - always receive distinct ids.
+
+Commit ids are recorded in a `_history_commits` directory table. A directory
+row is inserted in the same transaction as the writes, so:
+
+- If the block raises, the whole transaction is rolled back. The history rows
+  the triggers wrote disappear together with the business rows, and no
+  directory row is created. Rolled-back transfers therefore never appear in
+  any committed view.
+- Rows undone with `ROLLBACK TO SAVEPOINT` inside the transaction are removed
+  by SQLite in the same way and never reach the committed history view.
+- The id counter is updated inside the write transaction too, so a rollback
+  rewinds it and the id may be reused by a later transaction. Nothing stamped
+  with that id survives the rollback, so the reused id still identifies
+  exactly one committed transaction.
+
+Writes performed outside `tracked()` are still captured by the triggers, but
+their `_commit` stays `NULL`; they cannot be ordered relative to numbered
+commits.
+
+## Reading a balance before or after a commit
+
+`sqlite_history.snapshot_rows()` reconstructs the rows of a tracked table at a
+commit boundary. Pass `mode="after"` for the balance immediately after a
+commit was posted and `mode="before"` for the balance immediately before it:
+
+    before = sqlite_history.snapshot_rows(conn, "warehouse_a", 7, mode="before")
+    after = sqlite_history.snapshot_rows(conn, "warehouse_a", 7, mode="after")
+
+A snapshot only includes history rows whose `_commit` is at or below the
+boundary (`< commit` for "before", `<= commit` for "after"). Asking for a
+commit that was rolled back (or never registered) raises `ValueError`, since no
+committed view exists for it.
+
+### Legacy rows without commit evidence
+
+History rows whose `_commit` is `NULL` - rows backfilled from an existing
+table, rows written by an older version of this library, or writes not wrapped
+in `tracked()` - have no evidence placing them relative to numbered commits.
+They are explicitly defined as **predating every commit-scoped snapshot**, so
+they are always included and form the baseline the first numbered commit is
+read against. Reconfiguring a table created by an older version migrates its
+history table in place: the `_commit` column is added and existing rows keep
+`NULL`.
+
 ## How this works
 
 Given a table with the following schema:
@@ -86,7 +153,8 @@ CREATE TABLE _people_history (
     weight REAL,
     _version INTEGER,
     _updated INTEGER,
-    _mask INTEGER
+    _mask INTEGER,
+    _commit INTEGER
 );
 CREATE INDEX idx_people_history_rowid ON _people_history (_rowid);
 ```
@@ -110,6 +178,10 @@ Tables with different schemas will have different `_mask` values.
 
 A `_mask` of `-1` indicates that the row was deleted.
 
+The `_commit` column is the cross-table commit id of the transaction that wrote the history row. All history rows produced by the same `sqlite_history.tracked()` block - across every tracked table - share one value, which also appears in the `_history_commits` directory table. It is `NULL` for backfilled rows, rows from an older library version, and writes not wrapped in `tracked()`.
+
+Three extra database-level tables coordinate the ids: `_history_commits` (the directory of committed transactions), `_history_commit_seq` (the monotonic id counter) and `_history_state` (the commit id active on the current connection, read by the triggers).
+
 The following triggers are created to populate the `_people_history` table:
 <!-- [[[cog
 triggers_sql = sql.triggers_sql("people", [c[0] for c in columns_and_types])
@@ -121,15 +193,15 @@ cog.out(
 CREATE TRIGGER people_insert_history
 AFTER INSERT ON people
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
-    VALUES (new.rowid, new.id, new.name, new.age, new.weight, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15);
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _commit)
+    VALUES (new.rowid, new.id, new.name, new.age, new.weight, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15, (SELECT current_commit FROM _history_state WHERE id = 1));
 END;
 
 CREATE TRIGGER people_update_history
 AFTER UPDATE ON people
 FOR EACH ROW
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _commit)
     SELECT old.rowid, 
         CASE WHEN old.id != new.id then new.id else null end, 
         CASE WHEN old.name != new.name then new.name else null end, 
@@ -137,20 +209,22 @@ BEGIN
         CASE WHEN old.weight != new.weight then new.weight else null end,
         (SELECT MAX(_version) FROM _people_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
-        (CASE WHEN old.id != new.id then 1 else 0 end) + (CASE WHEN old.name != new.name then 2 else 0 end) + (CASE WHEN old.age != new.age then 4 else 0 end) + (CASE WHEN old.weight != new.weight then 8 else 0 end)
+        (CASE WHEN old.id != new.id then 1 else 0 end) + (CASE WHEN old.name != new.name then 2 else 0 end) + (CASE WHEN old.age != new.age then 4 else 0 end) + (CASE WHEN old.weight != new.weight then 8 else 0 end),
+        (SELECT current_commit FROM _history_state WHERE id = 1)
     WHERE old.id != new.id or old.name != new.name or old.age != new.age or old.weight != new.weight;
 END;
 
 CREATE TRIGGER people_delete_history
 AFTER DELETE ON people
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _commit)
     VALUES (
         old.rowid,
         old.id, old.name, old.age, old.weight,
         (SELECT COALESCE(MAX(_version), 0) from _people_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
-        -1
+        -1,
+        (SELECT current_commit FROM _history_state WHERE id = 1)
     );
 END;
 ```
