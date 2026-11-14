@@ -49,6 +49,14 @@ Plainly then, you may rely on their methods and attributes not changing in backw
 Submodules
 ----------
 
+referencing.policy
+^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.policy
+   :members:
+   :undoc-members:
+
+
 referencing.jsonschema
 ^^^^^^^^^^^^^^^^^^^^^^
 

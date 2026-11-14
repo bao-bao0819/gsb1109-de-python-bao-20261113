@@ -267,3 +267,58 @@ The above example would be written:
     print(resolver.lookup("https://json-schema.org/draft/2020-12/schema"))
 
 It is otherwise functionally equivalent to the above, other than that retrieval will not repeatedly make a web request.
+
+
+Combining Authorities With Declared Naming Ranges
+-------------------------------------------------
+
+Sometimes the resources you combine come from different authorities -- say a headquarters catalog, a regional overlay, and a project-level package -- and you need explicit rules for who is allowed to define which URI.
+
+You can attach a `referencing.Policy` to a registry to declare the URI prefixes its authority is responsible for, then combine them as usual:
+
+.. code:: python
+
+    from referencing import Policy, Registry, Resource
+    from referencing.jsonschema import DRAFT202012
+
+    headquarters = (
+        Registry()
+        .with_policy(Policy.from_scopes(["https://corp.example/schemas/"]))
+        .with_resource(
+            "https://corp.example/schemas/regions/east/r1",
+            DRAFT202012.create_resource({"title": "headquarters"}),
+        )
+    )
+    region = (
+        Registry()
+        .with_policy(
+            Policy.from_scopes(
+                ["https://corp.example/schemas/regions/east/"],
+            ),
+        )
+        .with_resource(
+            "https://corp.example/schemas/regions/east/r1",
+            DRAFT202012.create_resource({"title": "region"}),
+        )
+    )
+
+    combined = headquarters.combine(region)
+    print(combined.contents(
+        "https://corp.example/schemas/regions/east/r1",
+    )["title"])  # "region" -- the narrower authorization wins
+
+The rules are:
+
+* A **narrower** covering range always overrides a broader one, even when the broader range belongs to a hierarchically higher authority.
+* A definition whose authority's ranges do not cover the URI is inadmissible, so it cannot override one that is properly authorized -- including via anchors, which prevents an unauthorized name from routing to another authority's definition.
+* When two unrelated (neither-containing) authorizations both claim a URI that none of the declared ranges cover, the result is a *blocking conflict* that must be handled manually rather than guessed.
+
+A blocked URI is not retrievable (a `referencing.exceptions.PendingBlockingConflict` is raised) and the open conflicts are available for inspection:
+
+.. code:: python
+
+    print(combined.blocking_resource_conflicts())
+    print(combined.blocking_anchor_conflicts())
+
+Because the outcome is computed from the declared ranges rather than combination order, the same set of registries combined in any order yields the same retrievable resources and the same pending conflicts. Registries built without a policy remain *neutral* and keep the previous last-writer-wins behavior, so existing code is unaffected.
+

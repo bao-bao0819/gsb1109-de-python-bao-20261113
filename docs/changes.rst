@@ -2,6 +2,15 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Add `referencing.Policy`, which lets an authority declare the URI naming ranges it is responsible for.
+* `Registry.combine` (and the resource-adding methods) now settle contested URIs and anchors using these declared ranges: a narrower covering range overrides a broader one, while two unrelated authorizations produce a *blocking conflict* recorded on the registry.
+* Add `Registry.blocking_resource_conflicts` and `Registry.blocking_anchor_conflicts` to inspect the conflicts requiring manual handling, and a new `referencing.exceptions.PendingBlockingConflict` raised when attempting to retrieve (or resolve a reference to) a contested URI or anchor.
+* Combine results are now independent of combination order, and an alias brought by an unauthorized authority can no longer route to another authority's definition.
+* Registries constructed without a policy keep the previous last-writer-wins combination behavior.
+
 v0.37.0
 -------
 

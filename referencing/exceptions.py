@@ -112,6 +112,27 @@ class Unresolvable(Exception):
 
 
 @frozen
+class PendingBlockingConflict(Unresolvable):
+    """
+    Two authorities claim the same URI (or anchor) under unrelated scopes.
+
+    Neither claimant's declared naming range is contained within the other's,
+    so the conflict cannot be resolved automatically and requires manual
+    intervention.
+
+    The competing definitions are available via
+    `Registry.blocking_resource_conflicts` (or
+    `Registry.blocking_anchor_conflicts` for anchors).
+    """
+
+    def __str__(self) -> str:
+        return (
+            f"Conflicting, unrelated authorities both define {self.ref!r}. "
+            "Resolve the conflict manually before the URI can be retrieved."
+        )
+
+
+@frozen
 class PointerToNowhere(Unresolvable):
     """
     A JSON Pointer leads to a part of a document that does not exist.
