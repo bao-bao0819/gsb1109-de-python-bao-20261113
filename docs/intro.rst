@@ -267,3 +267,37 @@ The above example would be written:
     print(resolver.lookup("https://json-schema.org/draft/2020-12/schema"))
 
 It is otherwise functionally equivalent to the above, other than that retrieval will not repeatedly make a web request.
+
+
+Distinguishing Why Retrieval Failed
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A retriever can fail for meaningfully different reasons, and `referencing` lets you say which one, so that an answer which merely means "not here yet" is never accidentally reused for later requests.
+
+* Raise `referencing.exceptions.NotYetAvailable` when the resource simply has not been published yet, or `referencing.exceptions.IncompleteRetrieval` when this particular request could not be fully read (for example a truncated or interrupted response). Neither answer is authoritative, so it is never cached; every later request calls the retriever again, and once the resource does arrive it is found normally.
+
+* Raise `referencing.exceptions.ResourceWithdrawn` when the publisher has *confirmed* the resource will never exist. This absence is authoritative, so it is recorded and replayed for later requests within the same registry, without calling the retriever again. Because registries are immutable, the registry which recorded the absence is attached to the raised exception as its ``registry`` attribute; build further requests from it if you want the confirmed answer to be reused.
+
+* Raising a plain `referencing.exceptions.NoSuchResource` continues to mean simply that the retriever cannot look up the URI, and behaves exactly as before.
+
+A concrete resource always wins over an earlier recorded absence. Adding the resource to the registry (e.g. via `Registry.with_resource` or `Registry.with_contents`) supersedes any previously recorded withdrawal, and an older registry which still records the withdrawal is left untouched, so each batch keeps its own point-in-time interpretation.
+
+.. code:: python
+
+    from referencing import Registry
+    from referencing import exceptions
+
+    def retrieve(uri):
+        if published(uri):
+            return load_resource(uri)
+        if withdrawn(uri):  # publisher confirmed it is gone for good
+            raise exceptions.ResourceWithdrawn(ref=uri)
+        raise exceptions.NotYetAvailable(ref=uri)  # just not here yet
+
+    registry = Registry(retrieve=retrieve)
+    try:
+        registry.get_or_retrieve("urn:example:field-dictionary")
+    except exceptions.ResourceWithdrawn as error:
+        # Later requests against this registry reuse the confirmed absence.
+        frozen = error.registry
+

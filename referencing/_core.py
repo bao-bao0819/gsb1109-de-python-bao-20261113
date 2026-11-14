@@ -14,6 +14,7 @@ from referencing.typing import URI, Anchor as AnchorType, D, Mapping, Retrieve
 
 EMPTY_UNCRAWLED: HashTrieSet[URI] = HashTrieSet()
 EMPTY_PREVIOUS_RESOLVERS: List[URI] = List()
+EMPTY_WITHDRAWN: HashTrieMap[URI, exceptions.ResourceWithdrawn] = HashTrieMap()
 
 
 class _Unset(Enum):
@@ -321,6 +322,9 @@ class Registry(Mapping[URI, Resource[D]]):
     )
     _anchors: HashTrieMap[tuple[URI, str], AnchorType[D]] = HashTrieMap()
     _uncrawled: HashTrieSet[URI] = EMPTY_UNCRAWLED
+    _withdrawn: HashTrieMap[URI, exceptions.ResourceWithdrawn] = (
+        EMPTY_WITHDRAWN
+    )
     _retrieve: Retrieve[D] = field(default=_fail_to_retrieve, alias="retrieve")
 
     def __getitem__(self, uri: URI) -> Resource[D]:
@@ -381,13 +385,20 @@ class Registry(Mapping[URI, Resource[D]]):
 
         resources = self._resources
         uncrawled = self._uncrawled
+        withdrawn = self._withdrawn
         for resource in new:
             id = resource.id()
             if id is None:
                 raise exceptions.NoInternalID(resource=resource)
             uncrawled = uncrawled.insert(id)
             resources = resources.insert(id, resource)
-        return evolve(self, resources=resources, uncrawled=uncrawled)
+            withdrawn = withdrawn.discard(id)
+        return evolve(
+            self,
+            resources=resources,
+            uncrawled=uncrawled,
+            withdrawn=withdrawn,
+        )
 
     def __repr__(self) -> str:
         size = len(self)
@@ -409,6 +420,28 @@ class Registry(Mapping[URI, Resource[D]]):
         May involve crawling to find the given URI if it is not already known,
         so the returned object is a `Retrieved` object which contains both the
         resource value as well as the registry which ultimately contained it.
+
+        When a URI is not present, the configured retrieval callable is
+        invoked, and the way it fails determines both how the failure is
+        reported and whether the result may be reused for later requests:
+
+        * `exceptions.NotYetAvailable` (not published yet) and
+          `exceptions.IncompleteRetrieval` (this request was not fully read)
+          describe a request which could not be completed. They are not
+          authoritative, so they are neither cached nor reused; a later
+          request retries retrieval, and they are re-raised as-is;
+
+        * `exceptions.ResourceWithdrawn` means the publisher has confirmed the
+          resource does not exist. The confirmed absence is authoritative and
+          is recorded, then reused for later requests *within this registry's
+          issuing scope* (the same exception is raised again without calling
+          the retriever), until a concrete resource for the URI supersedes it;
+
+        * a plain `exceptions.NoSuchResource` is re-raised unchanged, as in
+          earlier behavior;
+
+        * any other exception is treated as the retrieval itself failing and
+          is wrapped in an `exceptions.Unretrievable`, and is not reused.
         """
         resource = self._resources.get(uri)
         if resource is not None:
@@ -419,17 +452,48 @@ class Registry(Mapping[URI, Resource[D]]):
         if resource is not None:
             return Retrieved(registry=registry, value=resource)
 
+        withdrawn = registry._withdrawn.get(uri)
+        if withdrawn is not None:
+            # Reuse the authoritative absence recorded for this issuing scope
+            # without calling the retriever again.
+            raise evolve(withdrawn, registry=registry)
+
         try:
             resource = registry._retrieve(uri)
         except (
-            exceptions.CannotDetermineSpecification,
+            exceptions.NotYetAvailable,
+            exceptions.IncompleteRetrieval,
+        ):
+            # A request which could not be completed -- whether because the
+            # resource has not been published yet or because the response was
+            # only partially read -- describes only this request. It must not
+            # be cached and reused for later requests.
+            raise
+        except exceptions.ResourceWithdrawn as error:
+            # A confirmed absence is authoritative within this issuing scope
+            # and may be reused for later requests against this registry. The
+            # registry which recorded it travels back on the exception, since
+            # registries themselves are immutable.
+            registry = evolve(
+                registry,
+                withdrawn=registry._withdrawn.insert(uri, error),
+            )
+            raise evolve(error, registry=registry) from error
+        except (
             exceptions.NoSuchResource,
+            exceptions.CannotDetermineSpecification,
         ):
             raise
         except Exception as error:
             raise exceptions.Unretrievable(ref=uri) from error
         else:
             registry = registry.with_resource(uri, resource)
+            # A concrete resource supersedes any earlier confirmed absence.
+            if uri in registry._withdrawn:
+                registry = evolve(
+                    registry,
+                    withdrawn=registry._withdrawn.remove(uri),
+                )
             return Retrieved(registry=registry, value=resource)
 
     def remove(self, uri: URI):
@@ -443,6 +507,7 @@ class Registry(Mapping[URI, Resource[D]]):
             self,
             resources=self._resources.remove(uri),
             uncrawled=self._uncrawled.discard(uri),
+            withdrawn=self._withdrawn.discard(uri),
             anchors=HashTrieMap(
                 (k, v) for k, v in self._anchors.items() if k[0] != uri
             ),
@@ -521,13 +586,21 @@ class Registry(Mapping[URI, Resource[D]]):
         """
         resources = self._resources
         uncrawled = self._uncrawled
+        withdrawn = self._withdrawn
         for uri, resource in pairs:
             # Empty fragment URIs are equivalent to URIs without the fragment.
             # TODO: Is this true for non JSON Schema resources? Probably not.
             uri = uri.rstrip("#")
             uncrawled = uncrawled.insert(uri)
             resources = resources.insert(uri, resource)
-        return evolve(self, resources=resources, uncrawled=uncrawled)
+            # A concrete resource supersedes any earlier confirmed absence.
+            withdrawn = withdrawn.discard(uri)
+        return evolve(
+            self,
+            resources=resources,
+            uncrawled=uncrawled,
+            withdrawn=withdrawn,
+        )
 
     def with_contents(
         self,
@@ -551,11 +624,13 @@ class Registry(Mapping[URI, Resource[D]]):
         resources = self._resources
         anchors = self._anchors
         uncrawled = self._uncrawled
+        withdrawn = self._withdrawn
         retrieve = self._retrieve
         for registry in registries:
             resources = resources.update(registry._resources)
             anchors = anchors.update(registry._anchors)
             uncrawled = uncrawled.update(registry._uncrawled)
+            withdrawn = withdrawn.update(registry._withdrawn)
 
             if registry._retrieve is not _fail_to_retrieve:
                 if registry._retrieve is not retrieve is not _fail_to_retrieve:
@@ -564,11 +639,19 @@ class Registry(Mapping[URI, Resource[D]]):
                         "functions.",
                     )
                 retrieve = registry._retrieve
+        # A concrete resource always wins over a confirmed absence, even when
+        # the two come from different registries being combined.
+        withdrawn = HashTrieMap(
+            (uri, error)
+            for uri, error in withdrawn.items()
+            if uri not in resources
+        )
         return evolve(
             self,
             anchors=anchors,
             resources=resources,
             uncrawled=uncrawled,
+            withdrawn=withdrawn,
             retrieve=retrieve,
         )
 

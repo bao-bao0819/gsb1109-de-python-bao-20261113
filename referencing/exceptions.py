@@ -12,16 +12,33 @@ from referencing._attrs import frozen
 
 if TYPE_CHECKING:
     from referencing import Resource
+    from referencing._core import Registry
     from referencing.typing import URI
 
 
-@frozen
+@attrs.frozen  # Because here we allow subclassing below.
 class NoSuchResource(KeyError):
     """
     The given URI is not present in a registry.
 
     Unlike most exceptions, this class *is* intended to be publicly
     instantiable and *is* part of the public API of the package.
+
+    More specific subclasses let a retriever explain *why* a resource could
+    not be returned, which controls whether the answer may be reused by later
+    requests:
+
+    * `NotYetAvailable` and `IncompleteRetrieval` describe a request which
+      could not be completed this time. They are not authoritative, are never
+      reused, and a later request will attempt retrieval again;
+
+    * `ResourceWithdrawn` describes a publisher-confirmed, durable absence.
+      It is authoritative and is reused for later requests within the same
+      issuing scope until a concrete resource supersedes it.
+
+    Raising this base class directly remains supported and preserves the
+    original behavior of simply signaling that the retriever cannot look up
+    the given URI.
     """
 
     ref: URI
@@ -33,6 +50,64 @@ class NoSuchResource(KeyError):
 
     def __hash__(self) -> int:
         return hash(attrs.astuple(self))
+
+
+@frozen
+class NotYetAvailable(NoSuchResource):
+    """
+    A resource which has not been published yet and may appear later.
+
+    This represents a *temporary* absence: the origin simply has not made the
+    resource available at the time of the request. It is not authoritative, so
+    it must never be cached or reused for subsequent requests, each of which
+    should attempt retrieval again.
+    """
+
+
+@frozen
+class IncompleteRetrieval(NoSuchResource):
+    """
+    A request which could not be fully read.
+
+    Unlike `NotYetAvailable`, the resource may in fact already exist; the
+    problem is that this particular request did not finish reading it (e.g. a
+    truncated response or an interrupted connection). Like `NotYetAvailable`,
+    the result is not authoritative and must not be reused -- a later request
+    should retry retrieval.
+    """
+
+
+@frozen
+class ResourceWithdrawn(NoSuchResource):
+    """
+    A resource whose publisher has confirmed it has been withdrawn.
+
+    This absence is authoritative and durable: the publisher asserts the
+    resource will never exist at the given URI. The result is therefore reused
+    for later requests within the same issuing scope, until a concrete
+    resource for the URI supersedes it.
+
+    Because registries are immutable, a `Registry.get_or_retrieve` call which
+    first observes this exception raises a copy carrying the evolved registry
+    that recorded the absence in ``registry``. Reusing that registry for later
+    requests replays the same answer without calling the retriever again. The
+    ``registry`` is intentionally excluded from equality and hashing, which
+    depend only on ``ref``.
+    """
+
+    registry: Registry[Any] | None = attrs.field(default=None, eq=False)
+
+    def __eq__(self, other: object) -> bool:
+        # Only ``ref`` participates in equality. The inherited implementation
+        # compares every field via ``attrs.astuple``, which would include the
+        # non-equality ``registry`` field above. This class cannot be
+        # subclassed, so the ``isinstance`` check is an exact-class check.
+        if not isinstance(other, ResourceWithdrawn):
+            return NotImplemented
+        return self.ref == other.ref
+
+    def __hash__(self) -> int:
+        return hash(self.ref)
 
 
 @frozen

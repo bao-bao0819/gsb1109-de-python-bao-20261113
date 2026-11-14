@@ -524,6 +524,168 @@ class TestRegistry:
         registry = Registry(retrieve=blow_up).with_resource("urn:root", root)
         assert registry.crawl()["urn:child"] == child
 
+    def test_retrieve_not_yet_available_is_never_reused(self):
+        uri = "urn:example:late"
+        calls = 0
+
+        def retrieve(each):
+            nonlocal calls
+            calls += 1
+            raise exceptions.NotYetAvailable(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        for _ in range(3):
+            with pytest.raises(exceptions.NotYetAvailable):
+                registry.get_or_retrieve(uri)
+        # Each request retries because the "not here yet" answer is not cached.
+        assert calls == 3
+
+    def test_retrieve_incomplete_is_never_reused(self):
+        uri = "urn:example:truncated"
+        calls = 0
+
+        def retrieve(each):
+            nonlocal calls
+            calls += 1
+            raise exceptions.IncompleteRetrieval(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        for _ in range(3):
+            with pytest.raises(exceptions.IncompleteRetrieval):
+                registry.get_or_retrieve(uri)
+        assert calls == 3
+
+    def test_retrieve_not_yet_available_then_published_succeeds(self):
+        uri = "urn:example:late"
+        published = Resource.opaque({"foo": "bar"})
+        calls = 0
+
+        def retrieve(each):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise exceptions.NotYetAvailable(ref=each)
+            return published
+
+        registry = Registry(retrieve=retrieve)
+        for _ in range(2):
+            with pytest.raises(exceptions.NotYetAvailable):
+                registry.get_or_retrieve(uri)
+        # Once the full manifest arrives, the same address resolves.
+        got = registry.get_or_retrieve(uri)
+        assert got.value == published
+        assert calls == 3
+
+    def test_retrieve_withdrawn_is_reused_within_its_issuing_scope(self):
+        uri = "urn:example:withdrawn"
+        calls = 0
+
+        def retrieve(each):
+            nonlocal calls
+            calls += 1
+            raise exceptions.ResourceWithdrawn(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        with pytest.raises(exceptions.ResourceWithdrawn) as first:
+            registry.get_or_retrieve(uri)
+        recorded = first.value.registry
+        assert recorded is not None
+        assert calls == 1
+
+        # The registry carried by the exception replays the confirmed
+        # absence without invoking the retriever again.
+        with pytest.raises(exceptions.ResourceWithdrawn) as again:
+            recorded.get_or_retrieve(uri)
+        assert calls == 1
+        assert again.value == exceptions.ResourceWithdrawn(ref=uri)
+
+    def test_resource_supersedes_recorded_withdrawal(self):
+        uri = "urn:example:now-published"
+        present = Resource.opaque({"foo": "bar"})
+
+        def retrieve(each):
+            raise exceptions.ResourceWithdrawn(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        with pytest.raises(exceptions.ResourceWithdrawn) as withdrawn:
+            registry.get_or_retrieve(uri)
+
+        # A new, complete manifest overturns the earlier confirmed absence.
+        updated = withdrawn.value.registry.with_resource(uri, present)
+        assert updated.get_or_retrieve(uri).value == present
+        assert uri not in updated._withdrawn
+
+    def test_interleaved_batches_keep_their_own_interpretation(self):
+        uri = "urn:example:field-dictionary"
+        present = Resource.opaque({"fields": []})
+        calls = 0
+
+        def retrieve(each):
+            nonlocal calls
+            calls += 1
+            raise exceptions.ResourceWithdrawn(ref=each)
+
+        # An older batch froze its (then authoritative) interpretation.
+        old_batch = Registry(retrieve=retrieve)
+        with pytest.raises(exceptions.ResourceWithdrawn) as error:
+            old_batch.get_or_retrieve(uri)
+        frozen_old = error.value.registry
+        assert calls == 1
+
+        # A newer batch has the complete manifest for the same address.
+        new_batch = frozen_old.with_resource(uri, present)
+
+        # Querying the two batches back and forth, each keeps the explanation
+        # it held at its own point in time; the new manifest never re-judges
+        # the frozen old batch, and the old answer never blocks the new one.
+        for _ in range(2):
+            assert new_batch.get_or_retrieve(uri).value == present
+            with pytest.raises(exceptions.ResourceWithdrawn):
+                frozen_old.get_or_retrieve(uri)
+
+        # The old batch still never re-invoked the retriever.
+        assert calls == 1
+
+    def test_combine_resources_win_over_recorded_withdrawal(self):
+        uri = "urn:example:withdrawn"
+        present = Resource.opaque({"foo": "bar"})
+
+        def retrieve(each):
+            raise exceptions.ResourceWithdrawn(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        with pytest.raises(exceptions.ResourceWithdrawn) as error:
+            registry.get_or_retrieve(uri)
+        recorded = error.value.registry
+        assert uri in recorded._withdrawn
+
+        # Combining with a registry that has the concrete resource lets the
+        # resource win over the confirmed absence.
+        with_resource = Registry().with_resource(uri, present)
+        combined = recorded.combine(with_resource)
+        assert combined.get_or_retrieve(uri).value == present
+        assert uri not in combined._withdrawn
+
+        # Without a concrete resource, the confirmed absence carries over.
+        only_withdrawn = recorded.combine(Registry())
+        with pytest.raises(exceptions.ResourceWithdrawn):
+            only_withdrawn.get_or_retrieve(uri)
+
+    def test_remove_clears_recorded_withdrawal(self):
+        uri = "urn:example:withdrawn"
+
+        def retrieve(each):
+            raise exceptions.ResourceWithdrawn(ref=each)
+
+        registry = Registry(retrieve=retrieve)
+        with pytest.raises(exceptions.ResourceWithdrawn) as error:
+            registry.get_or_retrieve(uri)
+        recorded = error.value.registry
+
+        present = Resource.opaque({"foo": "bar"})
+        removed = recorded.with_resource(uri, present).remove(uri)
+        assert uri not in removed._withdrawn
+
     def test_resolver(self):
         one = Resource.opaque(contents={})
         registry = Registry({"http://example.com": one})
@@ -830,6 +992,24 @@ class TestResolver:
             registry.get_or_retrieve(uri)
 
         resolver = registry.resolver()
+        with pytest.raises(exceptions.Unresolvable):
+            resolver.lookup(uri)
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            exceptions.NotYetAvailable,
+            exceptions.IncompleteRetrieval,
+            exceptions.ResourceWithdrawn,
+        ],
+    )
+    def test_lookup_retrieval_failure_is_unresolvable(self, failure):
+        uri = "http://example.com/"
+
+        def retrieve(each):
+            raise failure(ref=each)
+
+        resolver = Registry(retrieve=retrieve).resolver()
         with pytest.raises(exceptions.Unresolvable):
             resolver.lookup(uri)
 

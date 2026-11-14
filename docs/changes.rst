@@ -2,6 +2,17 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Distinguish the different ways a retrieval callable can fail, so that a temporary "not here yet" answer can no longer be mistaken for a durable one. Retrievers may now raise:
+
+  * ``referencing.exceptions.NotYetAvailable`` for a resource which has not been published yet, and ``referencing.exceptions.IncompleteRetrieval`` when a request could not be fully read. Both are non-authoritative, are never cached, and cause each later request to retry retrieval;
+
+  * ``referencing.exceptions.ResourceWithdrawn`` for a publisher-confirmed, durable absence. The confirmed absence is recorded and replayed for later requests within the same issuing scope, until a concrete resource for the URI supersedes it. Because registries are immutable, the registry which recorded the absence is attached to the raised exception as ``ResourceWithdrawn.registry``.
+
+  A plain ``NoSuchResource`` continues to behave exactly as before.
+
 v0.37.0
 -------
 
