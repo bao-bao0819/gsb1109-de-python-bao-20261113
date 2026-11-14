@@ -22,6 +22,33 @@ Cache files with urls of all SRTM files are generated in your HOME directory. In
     elevation_data = srtm.get_data(local_cache_dir="mydir")
     print('CGN Airport elevation (meters):', elevation_data.get_elevation(50.8682, 7.1377))
 
+## Multi-outlet drainage analysis
+
+Given a local elevation grid and a set of numbered outlets, `srtm.drainage`
+finds every outlet each cell may flow to, instead of forcing one downstream
+neighbour per cell (which makes watersheds depend on traversal order on flat
+ground). Water first spreads over the connected contour-level surface and is
+then allowed a strict descent, so a move is valid whenever the neighbour is
+not higher. Four- or eight-neighbour connectivity is chosen by the caller,
+and `None`/void cells are unknown outside terrain that is never traversed.
+
+    from srtm.drainage import analyze_drainage, Connectivity
+
+    grid = [
+        [3, 3, 3],
+        [3, 2, 3],
+        [3, 3, 3],
+    ]
+    result = analyze_drainage(grid, {1: (0, 0), 2: (0, 2)}, Connectivity.EIGHT)
+    result.outlets_for(2, 1)          # frozenset({1, 2}) -- disputed cell
+    result.is_closed_depression(1, 1) # enclosed low with no outlet
+    result.can_leak_to_void(0, 0)     # may spill into a missing area
+    result.paths(2, 1)                # concrete non-increasing path per outlet
+
+Use `srtm.drainage.grid_from_tile(tile)` to turn a loaded SRTM tile into the
+plain grid expected by `analyze_drainage`. Cells with no reachable outlet and
+no reachable void are reported separately as closed depressions.
+
 ## GPS Tracks
 
 You can add elevations for all points in a GPS track with:
