@@ -28,6 +28,19 @@ from . import utils as mod_utils
 
 from typing import *
 
+# Cell offset matrices used by the inverse distance weighted interpolation.
+# A radius of 1 uses 5 points and a radius of 2 uses 13 points:
+IDW_OFFSETS: Dict[int, Tuple[Any, ...]] = {
+    1: (None, (0, 1), None,
+        (-1, 0), (0, 0), (1, 0),
+        None, (0, -1), None),
+    2: (None, None, (0, 2), None, None,
+        None, (-1, 1), (0, 1), (1, 1), None,
+        (-2, 0), (-1, 0), (0, 0), (1, 0), (2, 0),
+        None, (-1, -1), (0, -1), (1, -1), None,
+        None, None, (0, -2), None, None),
+}
+
 class GeoElevationData:
     """
     The main class with utility methods for elevations. Note that files are
@@ -441,19 +454,10 @@ class GeoElevationFile:
             raises a ValueError if an invalid radius is supplied
 
         """
-        if radius == 1:
-            offsetmatrix: Any = (None, (0, 1), None,
-                           (-1, 0), (0, 0), (1, 0),
-                           None, (0, -1), None)
-        elif radius == 2:
-            offsetmatrix = (None, None, (0, 2), None, None,
-                            None, (-1, 1), (0, 1), (1, 1), None,
-                            (-2, 0), (-1, 0), (0, 0), (1, 0), (2, 0),
-                            None, (-1, -1), (0, -1), (1, -1), None,
-                            None, None, (0, -2), None, None)
-        else:
+        if radius not in IDW_OFFSETS:
             raise ValueError("Radius {} invalid, "
                              "expected 1 or 2".format(radius))
+        offsetmatrix = IDW_OFFSETS[radius]
 
         row, column = self.get_row_and_column(latitude, longitude)
         center_lat, center_long = self.get_lat_and_long(row, column)

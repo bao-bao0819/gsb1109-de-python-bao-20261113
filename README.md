@@ -108,6 +108,30 @@ gpxelevations is a utility command line tool to add/update elevations in a GPS t
       -f FILE, --file FILE  Output filename
       -v, --verbose         Verbose output
 
+## Updating tiles
+
+When a corrected version of a tile is delivered under the same file name,
+`srtm.update` decides which already collected profiles must be recomputed.
+Only the grid points that actually changed are taken into account: a
+delivery that only repackages the same samples (e.g. zip instead of raw
+.hgt) requeues nothing. Grid points that were void (missing) in the old
+version and are filled in the new one are tracked too, because profiles
+that previously fell back to another source (e.g. a neighbouring tile)
+now read this tile again:
+
+    from srtm import update as srtm_update
+
+    update = srtm_update.diff_tile_data('N44W072.hgt', old_bytes, new_bytes)
+    if update.has_changes:
+        profiles = [('profile-1', [(44.5, -71.5), ...]), ...]
+        entries = srtm_update.plan_recompute(elevation_data, [update], profiles,
+                                             approximate=True)
+        for entry in entries:
+            print(entry.profile_id, entry.reason, entry.latitude, entry.longitude)
+
+Every recompute entry keeps the location of the changed grid point that
+affects the profile, so each ticket can be verified against the tile.
+
 ## License
 
 SRTM.py is licensed under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)

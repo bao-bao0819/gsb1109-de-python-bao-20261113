@@ -20,10 +20,12 @@ Run all tests with:
 """
 
 import logging        as mod_logging
+import struct         as mod_struct
 import unittest       as mod_unittest
 import srtm           as mod_srtm
 from srtm import data as mod_data
 from srtm import main as mod_main
+from srtm import update as mod_update
 from srtm import utils as mod_utils
 
 mod_logging.basicConfig(level=mod_logging.DEBUG,
@@ -249,6 +251,160 @@ class Tests(mod_unittest.TestCase):
         elevation2 = geo_elevation_data.get_elevation(43.0382, 87.9298)
         self.assertTrue(len(geo_elevation_data.files) == 1)
         self.assertFalse(geo_elevation_data.files.keys() == keys1)
+
+
+    def _load_test_tile(self) -> bytes:
+        with open("test_files/N44W072.hgt", "rb") as hgtfile:
+            return hgtfile.read()
+
+    def _tile_map(self, hgt: bytes, file_name: str='N44W072.hgt') -> mod_data.GeoElevationData:
+        tilemap = mod_data.GeoElevationData({}, {}, file_handler=mod_utils.FileHandler())
+        tilemap.srtm3_files[file_name] = ""
+        tilemap.files[file_name] = mod_data.GeoElevationFile(file_name, hgt, tilemap)
+        return tilemap
+
+    def _with_cell(self, hgt: bytes, row: int, column: int, value: int, square_side: int=1201) -> bytes:
+        data = bytearray(hgt)
+        i = row * square_side + column
+        data[i * 2 : i * 2 + 2] = mod_struct.pack(">h", value)
+        return bytes(data)
+
+    def test_update_no_changes(self) -> None:
+        hgt = self._load_test_tile()
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, hgt)
+        self.assertFalse(update.has_changes)
+
+        tilemap = self._tile_map(hgt)
+        entries = mod_update.plan_recompute(tilemap, [update],
+                                            [('profile-1', [(44.5, -71.5)])])
+        self.assertEqual([], entries)
+
+    def test_update_packaging_only_change(self) -> None:
+        # Same samples, only delivered as zip instead of raw .hgt:
+        hgt = self._load_test_tile()
+        zipped = mod_utils.zip(hgt, 'N44W072.hgt')
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, zipped)
+        self.assertFalse(update.has_changes)
+        update = mod_update.diff_tile_data('N44W072.hgt', zipped, hgt)
+        self.assertFalse(update.has_changes)
+
+    def test_update_changed_cell_direct_hit(self) -> None:
+        hgt = self._load_test_tile()
+        changed_hgt = self._with_cell(hgt, 600, 600, 999)
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, changed_hgt)
+
+        self.assertTrue(update.has_changes)
+        self.assertEqual(1, len(update.changed_cells))
+        cell = update.changed_cells[0]
+        self.assertEqual((600, 600), (cell.row, cell.column))
+        self.assertEqual((44.5, -71.5), (cell.latitude, cell.longitude))
+        self.assertEqual(999, cell.new_elevation)
+
+        tilemap = self._tile_map(changed_hgt)
+        profiles = [('hit', [(44.5, -71.5)]),
+                    ('miss', [(44.9, -71.9)])]
+        entries = mod_update.plan_recompute(tilemap, [update], profiles)
+
+        self.assertEqual(1, len(entries))
+        entry = entries[0]
+        self.assertEqual('hit', entry.profile_id)
+        self.assertEqual('N44W072.hgt', entry.file_name)
+        self.assertEqual(mod_update.REASON_DIRECT, entry.reason)
+        # The impact location is the changed grid point:
+        self.assertEqual((44.5, -71.5), (entry.latitude, entry.longitude))
+
+    def test_update_void_filled(self) -> None:
+        hgt = self._load_test_tile()
+        # Old version has a hole (void) where the new one has a sample:
+        old_hgt = self._with_cell(hgt, 600, 600, -32768)
+        update = mod_update.diff_tile_data('N44W072.hgt', old_hgt, hgt)
+
+        self.assertEqual(1, len(update.changed_cells))
+        cell = update.changed_cells[0]
+        self.assertEqual(None, cell.old_elevation)
+        self.assertTrue(cell.new_elevation is not None)
+
+        tilemap = self._tile_map(hgt)
+        entries = mod_update.plan_recompute(tilemap, [update],
+                                            [('profile-1', [(44.5, -71.5)])])
+        self.assertEqual(1, len(entries))
+        self.assertEqual(mod_update.REASON_VOID_FILLED, entries[0].reason)
+        self.assertEqual((44.5, -71.5), (entries[0].latitude, entries[0].longitude))
+
+    def test_update_interpolation_reach(self) -> None:
+        hgt = self._load_test_tile()
+        changed_hgt = self._with_cell(hgt, 600, 600, 999)
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, changed_hgt)
+        tilemap = self._tile_map(changed_hgt)
+
+        # 1.5 grid steps south of the changed cell:
+        near = 44.5 - 1.5 / 1200
+        # 2.5 grid steps south -- outside of the approximation reach:
+        far = 44.5 - 2.5 / 1200
+
+        profiles = [('near', [(near, -71.5)]), ('far', [(far, -71.5)])]
+
+        entries = mod_update.plan_recompute(tilemap, [update], profiles)
+        self.assertEqual([], entries)
+
+        entries = mod_update.plan_recompute(tilemap, [update], profiles, approximate=True)
+        self.assertEqual(1, len(entries))
+        self.assertEqual('near', entries[0].profile_id)
+        self.assertEqual(mod_update.REASON_INTERPOLATED, entries[0].reason)
+        self.assertEqual((44.5, -71.5), (entries[0].latitude, entries[0].longitude))
+
+    def test_update_idw_reach(self) -> None:
+        hgt = self._load_test_tile()
+        changed_hgt = self._with_cell(hgt, 600, 600, 999)
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, changed_hgt)
+        tilemap = self._tile_map(changed_hgt)
+
+        # 2.5 grid steps south of the changed cell:
+        point = 44.5 - 2.5 / 1200
+
+        entries = mod_update.plan_recompute(tilemap, [update], [('p', [(point, -71.5)])],
+                                            idw_radius=1)
+        self.assertEqual([], entries)
+
+        entries = mod_update.plan_recompute(tilemap, [update], [('p', [(point, -71.5)])],
+                                            idw_radius=2)
+        self.assertEqual(1, len(entries))
+        self.assertEqual(mod_update.REASON_INTERPOLATED, entries[0].reason)
+
+    def test_update_neighbour_tile_source(self) -> None:
+        hgt = self._load_test_tile()
+        # A point in the tile to the south, close to the border, reads
+        # grid points from N44W072 when approximating:
+        tilemap = self._tile_map(hgt)
+        tilemap.srtm3_files['N43W072.hgt'] = ""
+        tilemap.files['N43W072.hgt'] = mod_data.GeoElevationFile('N43W072.hgt', hgt, tilemap)
+
+        latitude = 44. - 1. / 2400
+        sources = mod_update.get_source_cells(tilemap, latitude, -71.5, approximate=True)
+        self.assertIn(('N43W072.hgt', 0, 600), sources)
+        self.assertIn(('N44W072.hgt', 1199, 600), sources)
+
+        changed_hgt = self._with_cell(hgt, 1199, 600, 999)
+        update = mod_update.diff_tile_data('N44W072.hgt', hgt, changed_hgt)
+        tilemap.files['N44W072.hgt'] = mod_data.GeoElevationFile('N44W072.hgt', changed_hgt, tilemap)
+
+        entries = mod_update.plan_recompute(tilemap, [update], [('p', [(latitude, -71.5)])],
+                                            approximate=True)
+        self.assertEqual(1, len(entries))
+        self.assertEqual('N44W072.hgt', entries[0].file_name)
+        self.assertEqual(mod_update.REASON_INTERPOLATED, entries[0].reason)
+
+    def test_update_new_file(self) -> None:
+        hgt = self._load_test_tile()
+        update = mod_update.diff_tile_data('N44W072.hgt', None, hgt)
+        self.assertTrue(update.has_changes)
+        self.assertTrue(update.is_new_file)
+
+        tilemap = self._tile_map(hgt)
+        entries = mod_update.plan_recompute(tilemap, [update],
+                                            [('profile-1', [(44.5, -71.5)])])
+        self.assertEqual(1, len(entries))
+        self.assertEqual((44.5, -71.5), (entries[0].latitude, entries[0].longitude))
 
 
 if __name__ == '__main__':
