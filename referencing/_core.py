@@ -62,9 +62,12 @@ def _detect_or_default(
 
         from referencing.jsonschema import specification_with
 
+        # Contents which declare a dialect we don't support are left
+        # unparsed (opaque) rather than being misinterpreted using some
+        # other specification.
         return specification_with(
             jsonschema_dialect_id,  # type: ignore[reportUnknownArgumentType]
-            default=default,
+            default=Specification.OPAQUE,
         )
 
     return _detect
@@ -128,6 +131,11 @@ class Specification(Generic[D]):
     #: When this method is used as an instance method (i.e. called on a
     #: specific specification), that specification is used as the default
     #: if the given contents are unidentifiable.
+    #:
+    #: Contents which *do* identify a specification which is not supported
+    #: (e.g. an unknown JSON Schema dialect) are left unparsed -- they are
+    #: treated as `Specification.OPAQUE` rather than being misinterpreted
+    #: via the default specification.
     #:
     #: On the other hand when called as a class method, an error is raised.
     #:

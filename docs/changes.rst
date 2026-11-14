@@ -2,6 +2,11 @@
 Changelog
 =========
 
+v0.38.0
+-------
+
+* Leave resources which declare an unsupported JSON Schema dialect unparsed (treating them as opaque) when they are encountered while detecting specifications, e.g. while crawling for subresources, rather than interpreting them via some other specification.
+
 v0.37.0
 -------
 

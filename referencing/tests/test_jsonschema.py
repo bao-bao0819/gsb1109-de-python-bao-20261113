@@ -1,6 +1,6 @@
 import pytest
 
-from referencing import Registry, Resource, Specification
+from referencing import Registry, Resource, Specification, exceptions
 import referencing.jsonschema
 
 
@@ -179,6 +179,68 @@ def test_specification_with_default():
         default=Specification.OPAQUE,
     )
     assert specification is Specification.OPAQUE
+
+
+def test_detect_with_default_leaves_unknown_dialects_opaque():
+    """
+    Contents declaring an unsupported dialect are left unparsed (opaque)
+    rather than being interpreted via some other specification.
+    """
+    dialect_id = "http://example.com/unknown-json-schema-dialect-id"
+    detected = referencing.jsonschema.DRAFT202012.detect(
+        {"$schema": dialect_id},
+    )
+    assert detected is Specification.OPAQUE
+
+
+def test_crawl_only_indexes_subresources_from_known_locations():
+    """
+    Crawling uses the dialect applicable to each resource to find
+    subresources, so ``$id``\\ s in non-subschema locations (like
+    ``examples``) are not indexed, while real subresources are.
+    """
+    root = referencing.jsonschema.DRAFT202012.create_resource(
+        {
+            "$id": "http://example.com/root",
+            "examples": [{"$id": "http://example.com/not-a-resource"}],
+            "$defs": {"real": {"$id": "real", "type": "integer"}},
+        },
+    )
+    registry = Registry().with_resource(
+        "http://example.com/root",
+        root,
+    ).crawl()
+    assert registry["http://example.com/real"].contents == {
+        "$id": "real",
+        "type": "integer",
+    }
+    with pytest.raises(exceptions.NoSuchResource):
+        registry["http://example.com/not-a-resource"]
+
+
+def test_crawl_leaves_unsupported_dialects_unparsed():
+    """
+    A subresource declaring an unsupported dialect is kept as an unparsed
+    (opaque) region: neither its own ``$id`` nor anything within it is
+    indexed.
+    """
+    root = referencing.jsonschema.DRAFT202012.create_resource(
+        {
+            "$id": "http://example.com/root",
+            "$defs": {
+                "unsupported": {
+                    "$schema": "http://example.com/unsupported-dialect",
+                    "$id": "unsupported",
+                    "$defs": {"inner": {"$id": "inner"}},
+                },
+            },
+        },
+    )
+    registry = Registry().with_resource(
+        "http://example.com/root",
+        root,
+    ).crawl()
+    assert list(registry) == ["http://example.com/root"]
 
 
 # FIXME: The tests below should move to the referencing suite but I haven't yet
