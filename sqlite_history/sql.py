@@ -35,7 +35,7 @@ CREATE TRIGGER {table}_insert_history
 AFTER INSERT ON {table}
 BEGIN
     INSERT INTO _{table}_history (_rowid, {column_names}, _version, _updated, _mask)
-    VALUES (new.rowid, {new_column_values}, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), {mask});
+    VALUES (new.rowid, {new_column_values}, (SELECT COALESCE(MAX(_version), 0) FROM _{table}_history WHERE _rowid = new.rowid) + 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), {mask});
 END;
 """.format(
         table=table,
@@ -70,7 +70,7 @@ FOR EACH ROW
 BEGIN
     INSERT INTO _{table}_history (_rowid, {column_names}, _version, _updated, _mask)
     SELECT old.rowid, {update_columns_sql},
-        (SELECT MAX(_version) FROM _{table}_history WHERE _rowid = old.rowid) + 1,
+        (SELECT COALESCE(MAX(_version), 0) FROM _{table}_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
         {mask_sql}
     WHERE {where_sql};
@@ -109,6 +109,51 @@ SELECT rowid, {column_names}, 1, cast((julianday('now') - 2440587.5) * 86400 * 1
 FROM {table};
 """.format(
         table=table, column_names=column_names, mask=2 ** len(columns) - 1
+    )
+    return sql
+
+
+def backfill_state_table_sql():
+    """Return SQL for the table tracking batched backfill progress."""
+    return """
+CREATE TABLE IF NOT EXISTS _history_backfill (
+    table_name TEXT PRIMARY KEY,
+    last_rowid INTEGER,
+    max_rowid INTEGER,
+    done INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def backfill_batch_sql(table, columns):
+    """Return SQL inserting snapshots for one batch of rows.
+
+    Only rows with no existing history records are inserted, so rows
+    already captured by the triggers (inserted, updated or deleted
+    after the triggers were created) are never overwritten with a
+    fabricated scan-time snapshot. Takes two parameters: the rowid
+    to start after (NULL to start at the beginning) and the maximum
+    rowid of the batch.
+    """
+    column_names = ", ".join(escape_sqlite(column) for column in columns)
+    prefixed_column_names = ", ".join(
+        "src." + escape_sqlite(column) for column in columns
+    )
+    sql = """
+INSERT INTO _{table}_history (_rowid, {column_names}, _version, _updated, _mask)
+SELECT src.rowid, {prefixed_column_names}, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), {mask}
+FROM {table} src
+WHERE (?1 IS NULL OR src.rowid > ?1)
+AND src.rowid <= ?2
+AND NOT EXISTS (
+    SELECT 1 FROM _{table}_history h WHERE h._rowid = src.rowid
+)
+ORDER BY src.rowid;
+""".format(
+        table=table,
+        column_names=column_names,
+        prefixed_column_names=prefixed_column_names,
+        mask=2 ** len(columns) - 1,
     )
     return sql
 

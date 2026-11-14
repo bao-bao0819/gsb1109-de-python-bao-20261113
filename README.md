@@ -122,7 +122,7 @@ CREATE TRIGGER people_insert_history
 AFTER INSERT ON people
 BEGIN
     INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
-    VALUES (new.rowid, new.id, new.name, new.age, new.weight, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15);
+    VALUES (new.rowid, new.id, new.name, new.age, new.weight, (SELECT COALESCE(MAX(_version), 0) FROM _people_history WHERE _rowid = new.rowid) + 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15);
 END;
 
 CREATE TRIGGER people_update_history
@@ -135,7 +135,7 @@ BEGIN
         CASE WHEN old.name != new.name then new.name else null end, 
         CASE WHEN old.age != new.age then new.age else null end, 
         CASE WHEN old.weight != new.weight then new.weight else null end,
-        (SELECT MAX(_version) FROM _people_history WHERE _rowid = old.rowid) + 1,
+        (SELECT COALESCE(MAX(_version), 0) FROM _people_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
         (CASE WHEN old.id != new.id then 1 else 0 end) + (CASE WHEN old.name != new.name then 2 else 0 end) + (CASE WHEN old.age != new.age then 4 else 0 end) + (CASE WHEN old.weight != new.weight then 8 else 0 end)
     WHERE old.id != new.id or old.name != new.name or old.age != new.age or old.weight != new.weight;
@@ -155,6 +155,26 @@ BEGIN
 END;
 ```
 <!-- [[[end]]] -->
+
+## Backfilling in batches
+
+By default `configure_history()` snapshots all existing rows in a single transaction, which blocks other writers for the duration of the full-table scan. For large tables that are being written to while history is set up, pass `batch_size` to backfill in batches instead:
+
+    sqlite_history.configure_history(conn, "orders", batch_size=1000)
+
+Or from the command line:
+
+    python -m sqlite_history data.db orders --batch-size 1000
+
+Each batch runs in its own transaction, so other connections can keep inserting, updating and deleting between batches. Progress is tracked in a `_history_backfill` table (`table_name`, `last_rowid`, `max_rowid`, `done`):
+
+- `max_rowid` is the rowid high-water mark captured when the backfill starts - only rows up to that point are scanned. Rows inserted later are recorded by the insert trigger instead.
+- `last_rowid` is how far the scan has committed so far. If the process is interrupted, run the same command again (on any connection) and the backfill resumes from the last committed batch. `backfill(db, table, batch_size)` and `backfill_batch(db, table, batch_size)` offer the same control from Python, and `backfill_status(db, table)` reports progress.
+
+The triggers are installed before the backfill starts, and a batch only snapshots rows that have no history records yet. This means the change chain for every row stays complete and honest:
+
+- A row updated or deleted before its batch is scanned keeps only its trigger records - the backfill never inserts a scan-time snapshot that would falsely claim to be the row's original state.
+- Trigger records and backfill snapshots share one `_version` sequence per rowid, so committed batches and trigger entries stitch together without duplicates or gaps.
 
 ## Development
 

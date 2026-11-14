@@ -1,13 +1,15 @@
 import argparse
 import sqlite3
 import os
-from . import configure_history
+from . import backfill, backfill_status, configure_history
 
 
-def configure_triggers(database_path, tables):
+def configure_triggers(database_path, tables, batch_size=None):
     db = sqlite3.connect(database_path)
     for table in tables:
         if table.startswith("_") and table.endswith("_history"):
+            continue
+        if table == "_history_backfill":
             continue
         # Does a history table exist already?
         history_table_name = f"_{table}_history"
@@ -15,9 +17,14 @@ def configure_triggers(database_path, tables):
             f"SELECT name FROM sqlite_master WHERE type='table' AND name='{history_table_name}';"
         )
         if cursor.fetchone():
-            print(f"History table {history_table_name} already exists - skipping.")
+            status = backfill_status(db, table)
+            if status is not None and not status["done"]:
+                count = backfill(db, table, batch_size or 1000)
+                print(f"Resumed backfill for {table}: {count} rows considered.")
+            else:
+                print(f"History table {history_table_name} already exists - skipping.")
             continue
-        configure_history(db, table)
+        configure_history(db, table, batch_size=batch_size)
 
 
 def all_regular_tables(database_path):
@@ -64,6 +71,15 @@ def run(test_args=None):
     parser.add_argument(
         "--all", action="store_true", help="Configure for all tables in the database."
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Backfill existing rows in batches of this size, committing "
+        "between batches so other connections can keep writing. Progress "
+        "is tracked in the _history_backfill table and resumed if "
+        "interrupted. By default the backfill runs in one transaction.",
+    )
 
     if test_args:
         args = parser.parse_args(test_args)
@@ -87,4 +103,4 @@ def run(test_args=None):
     if missing_tables:
         parser.error("The following tables do not exist: " + ", ".join(missing_tables))
 
-    configure_triggers(args.database_path, args.tables)
+    configure_triggers(args.database_path, args.tables, batch_size=args.batch_size)
