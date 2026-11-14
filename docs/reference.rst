@@ -15,6 +15,9 @@ Main Interface
 .. autofunction:: run_pending
 .. autofunction:: run_all
 .. autofunction:: get_jobs
+.. autofunction:: get_jobs_at
+.. autofunction:: diff_jobs
+.. autofunction:: correct_job
 .. autofunction:: clear
 .. autofunction:: cancel_job
 .. autofunction:: next_run
@@ -29,6 +32,14 @@ Classes
    :undoc-members:
 
 .. autoclass:: schedule.Job
+   :members:
+   :undoc-members:
+
+.. autoclass:: schedule.JobEvent
+   :members:
+   :undoc-members:
+
+.. autoclass:: schedule.JobsDiff
    :members:
    :undoc-members:
 

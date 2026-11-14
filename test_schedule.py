@@ -1597,3 +1597,154 @@ class SchedulerTests(TestCase):
         scheduler.every()
         scheduler.every(10).seconds
         scheduler.run_pending()
+
+
+class JobHistoryTests(TestCase):
+    def test_get_jobs_at_replays_effective_moments(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 8, 0):
+            job_a = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job_b = scheduler.every(10).minutes.do(make_mock_job(name="b"))
+            job_b.tag("team-1")
+        with mock_datetime(2026, 11, 13, 9, 0):
+            job_a.tag("team-1")
+        with mock_datetime(2026, 11, 13, 10, 0):
+            scheduler.cancel_job(job_b)
+
+        at = datetime.datetime
+        assert scheduler.get_jobs_at("team-1", as_of=at(2026, 11, 13, 8, 30)) == [
+            job_b
+        ]
+        assert scheduler.get_jobs_at("team-1", as_of=at(2026, 11, 13, 9, 30)) == [
+            job_a,
+            job_b,
+        ]
+        assert scheduler.get_jobs_at("team-1", as_of=at(2026, 11, 13, 10, 30)) == [
+            job_a
+        ]
+        assert scheduler.get_jobs("team-1") == [job_a]
+
+    def test_get_jobs_at_replays_clear(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 8, 0):
+            job_a = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job_a.tag("team-1")
+            job_b = scheduler.every(10).minutes.do(make_mock_job(name="b"))
+            job_b.tag("team-2")
+        with mock_datetime(2026, 11, 13, 9, 0):
+            scheduler.clear("team-1")
+
+        at = datetime.datetime
+        assert scheduler.get_jobs_at(as_of=at(2026, 11, 13, 8, 30)) == [
+            job_a,
+            job_b,
+        ]
+        assert scheduler.get_jobs_at(as_of=at(2026, 11, 13, 9, 30)) == [job_b]
+
+    def test_same_effective_time_applies_registration_order(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 8, 0):
+            job = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+        effective = datetime.datetime(2026, 11, 13, 12, 0)
+        with mock_datetime(2026, 11, 13, 18, 0):
+            scheduler.correct_job(job, tags={"v1"}, effective_at=effective)
+        with mock_datetime(2026, 11, 13, 19, 0):
+            scheduler.correct_job(job, tags={"v2"}, effective_at=effective)
+
+        jobs = scheduler.get_jobs_at(
+            "v2", as_of=effective, known_at=datetime.datetime(2026, 11, 13, 20, 0)
+        )
+        assert jobs == [job]
+        assert (
+            scheduler.get_jobs_at(
+                "v1",
+                as_of=effective,
+                known_at=datetime.datetime(2026, 11, 13, 20, 0),
+            )
+            == []
+        )
+
+    def test_backfilled_correction_keeps_past_dispatch_basis(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 8, 0):
+            job = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job.tag("team-1")
+        # A correction entered today, effective yesterday
+        with mock_datetime(2026, 11, 14, 8, 0):
+            scheduler.correct_job(
+                job,
+                cancel=True,
+                effective_at=datetime.datetime(2026, 11, 13, 9, 0),
+            )
+
+        dispatch_moment = datetime.datetime(2026, 11, 13, 10, 0)
+        # What the shift saw back then is unchanged
+        assert scheduler.get_jobs_at("team-1", as_of=dispatch_moment) == [job]
+        # Reviewed with today's knowledge, the job was not subscribed
+        assert (
+            scheduler.get_jobs_at(
+                "team-1",
+                as_of=dispatch_moment,
+                known_at=datetime.datetime(2026, 11, 14, 12, 0),
+            )
+            == []
+        )
+        # The live schedule is untouched by the correction
+        assert scheduler.get_jobs("team-1") == [job]
+
+    def test_diff_jobs_between_two_shifts(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 7, 0):
+            job_a = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job_a.tag("team-1")
+            job_b = scheduler.every(10).minutes.do(make_mock_job(name="b"))
+            job_b.tag("team-1")
+        with mock_datetime(2026, 11, 13, 12, 0):
+            job_b.tag("team-2")
+        with mock_datetime(2026, 11, 13, 15, 0):
+            scheduler.cancel_job(job_a)
+            job_a2 = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job_a2.tag("team-1")
+
+        shift_1 = datetime.datetime(2026, 11, 13, 8, 0)
+        shift_2 = datetime.datetime(2026, 11, 13, 20, 0)
+        diff = scheduler.diff_jobs(shift_1, shift_2)
+        assert diff.added == [job_a2]
+        assert diff.removed == [job_a]
+        assert diff.retagged == [job_b]
+
+        team_diff = scheduler.diff_jobs(shift_1, shift_2, tag="team-1")
+        assert team_diff.added == [job_a2]
+        assert team_diff.removed == [job_a]
+        assert team_diff.retagged == []
+
+    def test_diff_jobs_defaults_to_what_each_shift_saw(self):
+        scheduler = schedule.Scheduler()
+        with mock_datetime(2026, 11, 13, 7, 0):
+            job = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+            job.tag("team-1")
+        with mock_datetime(2026, 11, 14, 8, 0):
+            scheduler.correct_job(
+                job,
+                tags={"team-2"},
+                effective_at=datetime.datetime(2026, 11, 13, 9, 0),
+            )
+
+        shift_1 = datetime.datetime(2026, 11, 13, 8, 0)
+        shift_2 = datetime.datetime(2026, 11, 13, 20, 0)
+        # By default both shifts are compared as seen on duty
+        diff = scheduler.diff_jobs(shift_1, shift_2)
+        assert diff.retagged == []
+        # With today's knowledge the correction shows up
+        reviewed = scheduler.diff_jobs(
+            shift_1, shift_2, to_known_at=datetime.datetime(2026, 11, 14, 12, 0)
+        )
+        assert reviewed.retagged == [job]
+
+    def test_correct_job_requires_tags_or_cancel(self):
+        scheduler = schedule.Scheduler()
+        job = scheduler.every(10).minutes.do(make_mock_job(name="a"))
+        with self.assertRaises(ScheduleValueError):
+            scheduler.correct_job(
+                job, effective_at=datetime.datetime(2026, 11, 13, 9, 0)
+            )

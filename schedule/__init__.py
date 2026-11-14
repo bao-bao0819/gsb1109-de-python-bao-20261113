@@ -45,7 +45,7 @@ import logging
 import random
 import re
 import time
-from typing import Set, List, Optional, Callable, Union
+from typing import Dict, FrozenSet, Set, List, Optional, Callable, Union
 
 logger = logging.getLogger("schedule")
 
@@ -76,6 +76,86 @@ class CancelJob:
     pass
 
 
+class JobEvent:
+    """
+    A single recorded change to the job list.
+
+    Events are bitemporal: ``effective_at`` is the moment the change
+    takes effect (valid time), while ``recorded_at`` is the moment the
+    change became known to the scheduler (transaction time). A
+    correction can be backfilled with an ``effective_at`` in the past,
+    but its ``recorded_at`` is always the moment it was entered, so
+    replays of what was known earlier are not rewritten.
+
+    Events that share the same ``effective_at`` are applied in
+    registration order: the event with the higher ``seq`` wins.
+    """
+
+    def __init__(
+        self,
+        seq: int,
+        kind: str,
+        job: Optional["Job"],
+        tags: FrozenSet[Hashable],
+        effective_at: datetime.datetime,
+        recorded_at: datetime.datetime,
+    ) -> None:
+        self.seq = seq
+        self.kind = kind  # "registered", "tagged", "cancelled" or "cleared"
+        self.job = job
+        self.tags = tags
+        self.effective_at = effective_at
+        self.recorded_at = recorded_at
+
+    def __repr__(self) -> str:
+        return (
+            "JobEvent(seq={}, kind={}, job={}, tags={}, "
+            "effective_at={}, recorded_at={})"
+        ).format(
+            self.seq,
+            self.kind,
+            self.job,
+            sorted(self.tags, key=repr),
+            self.effective_at,
+            self.recorded_at,
+        )
+
+
+class JobsDiff:
+    """
+    The difference between two replayed job lists, as returned by
+    :meth:`Scheduler.diff_jobs`.
+
+    :param added: jobs present in the ``to`` snapshot only
+    :param removed: jobs present in the ``from`` snapshot only
+    :param retagged: jobs present in both snapshots whose tags differ
+    """
+
+    def __init__(
+        self,
+        added: List["Job"],
+        removed: List["Job"],
+        retagged: List["Job"],
+    ) -> None:
+        self.added = added
+        self.removed = removed
+        self.retagged = retagged
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, JobsDiff):
+            return NotImplemented
+        return (
+            self.added == other.added
+            and self.removed == other.removed
+            and self.retagged == other.retagged
+        )
+
+    def __repr__(self) -> str:
+        return "JobsDiff(added={}, removed={}, retagged={})".format(
+            self.added, self.removed, self.retagged
+        )
+
+
 class Scheduler:
     """
     Objects instantiated by the :class:`Scheduler <Scheduler>` are
@@ -85,6 +165,8 @@ class Scheduler:
 
     def __init__(self) -> None:
         self.jobs: List[Job] = []
+        self.history: List[JobEvent] = []
+        self._event_seq: int = 0
 
     def run_pending(self) -> None:
         """
@@ -132,6 +214,203 @@ class Scheduler:
         else:
             return [job for job in self.jobs if tag in job.tags]
 
+    def get_jobs_at(
+        self,
+        tag: Optional[Hashable] = None,
+        *,
+        as_of: Optional[datetime.datetime] = None,
+        known_at: Optional[datetime.datetime] = None,
+    ) -> List["Job"]:
+        """
+        Replay the job list as it was (or should have been) effective
+        at a given moment.
+
+        :param tag: An identifier used to identify a subset of
+                    jobs to retrieve
+        :param as_of: The effective moment to replay. Defaults to now.
+        :param known_at: Only use events recorded up to this moment.
+                         Defaults to ``as_of``, which reproduces what
+                         was actually visible at that moment. Pass a
+                         later moment (e.g. now) to include corrections
+                         backfilled afterwards and answer "what should
+                         it have been, given what we know today".
+        :return: The jobs effective at ``as_of``, in registration order
+        """
+        state = self._replay(as_of, known_at)
+        return [job for job, tags in state.items() if tag is None or tag in tags]
+
+    def diff_jobs(
+        self,
+        from_as_of: datetime.datetime,
+        to_as_of: datetime.datetime,
+        tag: Optional[Hashable] = None,
+        *,
+        from_known_at: Optional[datetime.datetime] = None,
+        to_known_at: Optional[datetime.datetime] = None,
+    ) -> JobsDiff:
+        """
+        Compare the job list effective at two moments, e.g. the
+        subscriptions two shifts actually dispatched from.
+
+        ``from_known_at`` / ``to_known_at`` default to their respective
+        ``as_of`` moment, so by default both sides are compared as they
+        were seen on duty. Pass a later ``known_at`` to compare with
+        today's knowledge instead.
+
+        :param from_as_of: Effective moment of the baseline snapshot
+        :param to_as_of: Effective moment of the snapshot to compare
+        :param tag: Restrict both snapshots to jobs with this tag. The
+                    comparison is then membership-based, so ``retagged``
+                    is always empty.
+        :param from_known_at: Knowledge cutoff for the baseline snapshot
+        :param to_known_at: Knowledge cutoff for the compared snapshot
+        :return: A :class:`JobsDiff <JobsDiff>` with the jobs that were
+                 added, removed or retagged between the two snapshots
+        """
+        from_state = self._replay(from_as_of, from_known_at)
+        to_state = self._replay(to_as_of, to_known_at)
+        if tag is not None:
+            from_members = {j for j, t in from_state.items() if tag in t}
+            to_members = {j for j, t in to_state.items() if tag in t}
+            return JobsDiff(
+                added=[job for job in to_state if job in to_members - from_members],
+                removed=[
+                    job for job in from_state if job in from_members - to_members
+                ],
+                retagged=[],
+            )
+        added = [job for job in to_state if job not in from_state]
+        removed = [job for job in from_state if job not in to_state]
+        retagged = [
+            job
+            for job in to_state
+            if job in from_state and from_state[job] != to_state[job]
+        ]
+        return JobsDiff(added=added, removed=removed, retagged=retagged)
+
+    def correct_job(
+        self,
+        job: "Job",
+        *,
+        tags: Optional[Set[Hashable]] = None,
+        cancel: bool = False,
+        effective_at: datetime.datetime,
+        recorded_at: Optional[datetime.datetime] = None,
+    ) -> JobEvent:
+        """
+        Record a retroactive correction for a job, e.g. backfilling a
+        tag change or unsubscription that took effect yesterday.
+
+        The correction only enters the history with ``recorded_at``
+        defaulting to now: replays of moments before today keep
+        showing what was known then, so dispatch decisions already
+        made are not rewritten. The currently scheduled job is left
+        untouched.
+
+        :param job: The job the correction applies to
+        :param tags: The tags the job should have had, unless cancelling
+        :param cancel: Record that the job was not subscribed anymore
+        :param effective_at: The moment the correction takes effect
+        :param recorded_at: The moment the correction becomes known,
+                            defaults to now
+        :return: The recorded :class:`JobEvent <JobEvent>`
+        """
+        if cancel:
+            return self._record_event(
+                "cancelled",
+                job=job,
+                effective_at=effective_at,
+                recorded_at=recorded_at,
+            )
+        if tags is None:
+            raise ScheduleValueError(
+                "correct_job() requires either tags or cancel=True"
+            )
+        return self._record_event(
+            "tagged",
+            job=job,
+            tags=tags,
+            effective_at=effective_at,
+            recorded_at=recorded_at,
+        )
+
+    def _record_event(
+        self,
+        kind: str,
+        job: Optional["Job"] = None,
+        tags: Optional[Set[Hashable]] = None,
+        effective_at: Optional[datetime.datetime] = None,
+        recorded_at: Optional[datetime.datetime] = None,
+    ) -> JobEvent:
+        """
+        Append an event to the history. ``effective_at`` and
+        ``recorded_at`` both default to now; ``seq`` is a per-scheduler
+        registration counter used to order events that share the same
+        effective moment.
+        """
+        now = datetime.datetime.now()
+        self._event_seq += 1
+        event = JobEvent(
+            seq=self._event_seq,
+            kind=kind,
+            job=job,
+            tags=frozenset(tags) if tags is not None else frozenset(),
+            effective_at=effective_at if effective_at is not None else now,
+            recorded_at=recorded_at if recorded_at is not None else now,
+        )
+        self.history.append(event)
+        return event
+
+    def _replay(
+        self,
+        as_of: Optional[datetime.datetime],
+        known_at: Optional[datetime.datetime],
+    ) -> Dict["Job", Set[Hashable]]:
+        """
+        Rebuild the job list effective at ``as_of`` from the events
+        recorded up to ``known_at``. Both default to no cutoff. Events
+        are applied in order of their effective moment, ties broken by
+        registration order.
+        """
+        effective_cutoff = as_of if as_of is not None else datetime.datetime.max
+        if known_at is not None:
+            recorded_cutoff = known_at
+        elif as_of is not None:
+            recorded_cutoff = as_of
+        else:
+            recorded_cutoff = datetime.datetime.max
+        events = [
+            event
+            for event in self.history
+            if event.effective_at <= effective_cutoff
+            and event.recorded_at <= recorded_cutoff
+        ]
+        events.sort(key=lambda event: (event.effective_at, event.seq))
+        state: Dict[Job, Set[Hashable]] = {}
+        for event in events:
+            if event.kind == "cleared":
+                if not event.tags:
+                    state.clear()
+                else:
+                    cleared_tag = next(iter(event.tags))
+                    state = {
+                        job: tags
+                        for job, tags in state.items()
+                        if cleared_tag not in tags
+                    }
+                continue
+            job = event.job
+            if job is None:
+                continue
+            if event.kind == "registered":
+                state[job] = set(event.tags)
+            elif event.kind == "tagged":
+                if job in state:
+                    state[job] = set(event.tags)
+            elif event.kind == "cancelled":
+                state.pop(job, None)
+        return state
+
     def clear(self, tag: Optional[Hashable] = None) -> None:
         """
         Deletes scheduled jobs marked with the given tag, or all jobs
@@ -143,9 +422,11 @@ class Scheduler:
         if tag is None:
             logger.debug("Deleting *all* jobs")
             del self.jobs[:]
+            self._record_event("cleared")
         else:
             logger.debug('Deleting all jobs tagged "%s"', tag)
             self.jobs[:] = (job for job in self.jobs if tag not in job.tags)
+            self._record_event("cleared", tags={tag})
 
     def cancel_job(self, job: "Job") -> None:
         """
@@ -156,6 +437,7 @@ class Scheduler:
         try:
             logger.debug('Cancelling job "%s"', str(job))
             self.jobs.remove(job)
+            self._record_event("cancelled", job=job)
         except ValueError:
             logger.debug('Cancelling not-scheduled job "%s"', str(job))
 
@@ -466,6 +748,8 @@ class Job:
         if not all(isinstance(tag, Hashable) for tag in tags):
             raise TypeError("Tags must be hashable")
         self.tags.update(tags)
+        if self.scheduler is not None and self in self.scheduler.jobs:
+            self.scheduler._record_event("tagged", job=self, tags=self.tags)
         return self
 
     def at(self, time_str: str, tz: Optional[str] = None):
@@ -661,6 +945,7 @@ class Job:
                 "Job is not associated with an scheduler"
             )
         self.scheduler.jobs.append(self)
+        self.scheduler._record_event("registered", job=self, tags=self.tags)
         return self
 
     @property
@@ -866,6 +1151,58 @@ def get_jobs(tag: Optional[Hashable] = None) -> List[Job]:
     :data:`default scheduler instance <default_scheduler>`.
     """
     return default_scheduler.get_jobs(tag)
+
+
+def get_jobs_at(
+    tag: Optional[Hashable] = None,
+    *,
+    as_of: Optional[datetime.datetime] = None,
+    known_at: Optional[datetime.datetime] = None,
+) -> List[Job]:
+    """Calls :meth:`get_jobs_at <Scheduler.get_jobs_at>` on the
+    :data:`default scheduler instance <default_scheduler>`.
+    """
+    return default_scheduler.get_jobs_at(tag, as_of=as_of, known_at=known_at)
+
+
+def diff_jobs(
+    from_as_of: datetime.datetime,
+    to_as_of: datetime.datetime,
+    tag: Optional[Hashable] = None,
+    *,
+    from_known_at: Optional[datetime.datetime] = None,
+    to_known_at: Optional[datetime.datetime] = None,
+) -> JobsDiff:
+    """Calls :meth:`diff_jobs <Scheduler.diff_jobs>` on the
+    :data:`default scheduler instance <default_scheduler>`.
+    """
+    return default_scheduler.diff_jobs(
+        from_as_of,
+        to_as_of,
+        tag,
+        from_known_at=from_known_at,
+        to_known_at=to_known_at,
+    )
+
+
+def correct_job(
+    job: Job,
+    *,
+    tags: Optional[Set[Hashable]] = None,
+    cancel: bool = False,
+    effective_at: datetime.datetime,
+    recorded_at: Optional[datetime.datetime] = None,
+) -> JobEvent:
+    """Calls :meth:`correct_job <Scheduler.correct_job>` on the
+    :data:`default scheduler instance <default_scheduler>`.
+    """
+    return default_scheduler.correct_job(
+        job,
+        tags=tags,
+        cancel=cancel,
+        effective_at=effective_at,
+        recorded_at=recorded_at,
+    )
 
 
 def clear(tag: Optional[Hashable] = None) -> None:
