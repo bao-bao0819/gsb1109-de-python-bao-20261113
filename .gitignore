@@ -14,3 +14,6 @@ htmlcov/
 SRTM.py.egg-info/
 .coverage
 .mypy_cache/
+batch_tiles/
+checklist_tiles/
+output/
