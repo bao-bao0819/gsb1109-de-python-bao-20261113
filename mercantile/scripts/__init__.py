@@ -3,11 +3,13 @@
 
 import json
 import logging
+import os
 import sys
 
 import click
 
 import mercantile
+import mercantile.coverage
 
 
 def configure_logging(verbosity):
@@ -561,3 +563,77 @@ def quadkey(ctx, input):
             click.echo(output)
     except mercantile.QuadKeyError:
         raise click.BadParameter("{0}".format(input), param=input, param_hint="input")
+
+
+# The offline command.
+@cli.command(
+    "offline",
+    short_help="Maintain an offline, hierarchically published map collection.",
+)
+@click.argument("input", default="-", required=False)
+@click.option(
+    "--mode",
+    type=click.Choice([mercantile.coverage.FALLBACK, mercantile.coverage.STOP]),
+    default=mercantile.coverage.FALLBACK,
+    help="Meaning of a withdrawal when a record does not state one: "
+    "'fallback' drops to the parent map (the default) or 'stop' leaves "
+    "the area unprovided.",
+)
+@click.option(
+    "--report/--no-report",
+    default=False,
+    help="Print the change report (affected leaf ranges, late files) "
+    "instead of the resulting leaf tiles.",
+)
+@click.pass_context
+def offline(ctx, input, mode, report):
+    """Apply publication and withdrawal files to an offline collection.
+
+    INPUT is either a directory of ``*.json`` collection files or newline
+    delimited JSON records read from a file or stdin. Each record looks like
+
+      {"rev": 3, "source": "a", "action": "retract",
+       "retract_mode": "fallback", "tiles": [[0, 0, 1]]}
+
+    ``action`` is "publish" (the default) or "retract" and ``retract_mode`` is
+    "fallback" (the default) or "stop". Records are reconciled by source
+    revision so late files are ignored, and replaying the same input never
+    degrades the visible coverage another level. Output is the disjoint set of
+    leaf tiles a reader should use.
+
+    Example:
+
+    \b
+    echo '{"rev": 1, "tiles": [[0, 0, 0]]}' | mercantile offline
+    [0, 0, 0]
+    """
+    try:
+        if input != "-" and os.path.isdir(input):
+            coverage = mercantile.coverage.OfflineCoverage(input)
+            change = coverage.load_directory()
+        else:
+            records = []
+            for line in iter_lines(normalize_input(input)):
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    records.append(obj)
+                elif obj and isinstance(obj[0], dict):
+                    records.extend(obj)
+                else:
+                    records.append({"rev": 0, "action": "publish", "tiles": [obj[:3]]})
+            for record in records:
+                if (
+                    record.get("action") == mercantile.coverage.RETRACT
+                    and "retract_mode" not in record
+                ):
+                    record["retract_mode"] = mode
+            coverage = mercantile.coverage.OfflineCoverage()
+            change = coverage.apply_many(records)
+    except mercantile.coverage.CoverageError as exc:
+        raise click.BadParameter(str(exc), param=input, param_hint="input")
+
+    if report:
+        click.echo(json.dumps(change.as_dict(), sort_keys=True))
+    else:
+        for tile in coverage.leaves():
+            click.echo(json.dumps(list(tile)))
