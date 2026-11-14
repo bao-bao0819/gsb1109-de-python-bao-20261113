@@ -86,7 +86,8 @@ CREATE TABLE _people_history (
     weight REAL,
     _version INTEGER,
     _updated INTEGER,
-    _mask INTEGER
+    _mask INTEGER,
+    _schema_version INTEGER
 );
 CREATE INDEX idx_people_history_rowid ON _people_history (_rowid);
 ```
@@ -110,6 +111,8 @@ Tables with different schemas will have different `_mask` values.
 
 A `_mask` of `-1` indicates that the row was deleted.
 
+The `_schema_version` column records which column layout the row - and its `_mask` bitmap - was written against. See [Schema changes](#schema-changes) for details. It is `1` unless the tracked table's schema has been changed since history was configured.
+
 The following triggers are created to populate the `_people_history` table:
 <!-- [[[cog
 triggers_sql = sql.triggers_sql("people", [c[0] for c in columns_and_types])
@@ -121,15 +124,15 @@ cog.out(
 CREATE TRIGGER people_insert_history
 AFTER INSERT ON people
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
-    VALUES (new.rowid, new.id, new.name, new.age, new.weight, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15);
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _schema_version)
+    VALUES (new.rowid, new.id, new.name, new.age, new.weight, 1, cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer), 15, 1);
 END;
 
 CREATE TRIGGER people_update_history
 AFTER UPDATE ON people
 FOR EACH ROW
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _schema_version)
     SELECT old.rowid, 
         CASE WHEN old.id != new.id then new.id else null end, 
         CASE WHEN old.name != new.name then new.name else null end, 
@@ -137,24 +140,49 @@ BEGIN
         CASE WHEN old.weight != new.weight then new.weight else null end,
         (SELECT MAX(_version) FROM _people_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
-        (CASE WHEN old.id != new.id then 1 else 0 end) + (CASE WHEN old.name != new.name then 2 else 0 end) + (CASE WHEN old.age != new.age then 4 else 0 end) + (CASE WHEN old.weight != new.weight then 8 else 0 end)
+        (CASE WHEN old.id != new.id then 1 else 0 end) + (CASE WHEN old.name != new.name then 2 else 0 end) + (CASE WHEN old.age != new.age then 4 else 0 end) + (CASE WHEN old.weight != new.weight then 8 else 0 end),
+        1
     WHERE old.id != new.id or old.name != new.name or old.age != new.age or old.weight != new.weight;
 END;
 
 CREATE TRIGGER people_delete_history
 AFTER DELETE ON people
 BEGIN
-    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask)
+    INSERT INTO _people_history (_rowid, id, name, age, weight, _version, _updated, _mask, _schema_version)
     VALUES (
         old.rowid,
         old.id, old.name, old.age, old.weight,
         (SELECT COALESCE(MAX(_version), 0) from _people_history WHERE _rowid = old.rowid) + 1,
         cast((julianday('now') - 2440587.5) * 86400 * 1000 as integer),
-        -1
+        -1,
+        1
     );
 END;
 ```
 <!-- [[[end]]] -->
+
+## Schema changes
+
+If the schema of a tracked table changes - columns are added, removed, reordered or split - run `configure_history()` (or the CLI) again. The history table is migrated in a single transaction:
+
+- New columns are added to the history table. Existing columns are never dropped or rewritten, so old rows keep the facts that were recorded at the time. If a column no longer exists - for example `weight` was split into `gross_weight` and `net_weight` - old rows keep their value in the original column and the new columns stay `null` for those rows. Values are never fabricated for columns that did not exist when a row was recorded.
+- A new entry is recorded in the `_<table>_history_schema` registry table, mapping each `_schema_version` to the ordered column list that was in effect for rows written with that version.
+- The triggers are rebuilt against the new column layout, so new writes are recorded with the new `_schema_version` and a `_mask` bitmap that matches the new column order.
+
+Because the migration runs in a single transaction, interrupting it (or re-opening the database halfway through) can never leave committed rows with an ambiguous column interpretation - either the old or the new layout is in effect, and re-running `configure_history()` completes the migration.
+
+To interpret a history row, look up the column layout for its `_schema_version` and decode its `_mask` against that layout:
+
+```python
+from sqlite_history import decode_mask, schema_versions
+
+versions = schema_versions(db, "people")
+# {1: [("id", "INTEGER"), ("name", "TEXT"), ...], 2: [...]}
+for row in db["_people_history"].rows:
+    columns = [name for name, _ in versions[row["_schema_version"]]]
+    changed = decode_mask(row["_mask"], columns)
+    print(row["_rowid"], row["_version"], "changed:", changed)
+```
 
 ## Development
 

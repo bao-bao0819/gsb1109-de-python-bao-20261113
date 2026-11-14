@@ -7,16 +7,12 @@ from . import configure_history
 def configure_triggers(database_path, tables):
     db = sqlite3.connect(database_path)
     for table in tables:
-        if table.startswith("_") and table.endswith("_history"):
+        if table.startswith("_") and (
+            table.endswith("_history") or table.endswith("_history_schema")
+        ):
             continue
-        # Does a history table exist already?
-        history_table_name = f"_{table}_history"
-        cursor = db.execute(
-            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{history_table_name}';"
-        )
-        if cursor.fetchone():
-            print(f"History table {history_table_name} already exists - skipping.")
-            continue
+        # configure_history() creates the history tables if needed and
+        # migrates them if the table schema changed since last time
         configure_history(db, table)
 
 
